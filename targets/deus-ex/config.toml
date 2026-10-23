@@ -1,0 +1,80 @@
+# Deus Ex 2000 — Configuration
+
+[game]
+name = "Deus Ex"
+version = "1.0"
+release_year = 2000
+engine = "Unreal Engine 1"
+developer = "Ion Storm"
+
+[binary]
+format = "PE32"
+architecture = "x86"
+entry_point = "0x00401000"
+
+[performance]
+target_fps = 120
+original_fps = 60  # Locked by vsync
+cpu_bound = true
+single_threaded = true
+
+[known_issues]
+fps_lock = "Engine hardcodes 60fps via vsync"
+input_lag = "Input processed synchronously with rendering"
+quest_stutter = "Quest checks block main thread"
+pathfinding = "Full recalculation every frame"
+rendering = "Single-threaded, no frustum culling"
+
+[optimization_targets]
+[[optimization_targets.functions]]
+name = "UWorld_Tick"
+address_hint = "0x0045A123"
+estimated_impact = "Critical"
+description = "Main game loop, processes all actors"
+
+[[optimization_targets.functions]]
+name = "AIPerformTask"
+address_hint = "0x0046B234"
+estimated_impact = "High"
+description = "AI behavior tree execution"
+
+[[optimization_targets.functions]]
+name = "Pathfinding_Update"
+address_hint = "0x0047C345"
+estimated_impact = "High"
+description = "Navigation mesh updates"
+
+[[optimization_targets.functions]]
+name = "Render_DrawActors"
+address_hint = "0x0048D456"
+estimated_impact = "Medium"
+description = "Actor rendering loop"
+
+[[optimization_targets.functions]]
+name = "QuestCheck_Perform"
+address_hint = "0x0049E567"
+estimated_impact = "Medium"
+description = "Quest condition evaluation"
+
+[quirks_to_preserve]
+[[quirks_to_preserve.quirks]]
+name = "Fixed 60fps feel"
+description = "Original timing was designed for 60fps"
+preserve = false  # We're fixing this
+
+[[quirks_to_preserve.quirks]]
+name = "AI decision delay"
+description = "Some AI has intentional delays"
+preserve = true
+
+[[quirks_to_preserve.quirks]]
+name = "Pathfinding noise"
+description = "AI makes occasional wrong turns"
+preserve = true  # Part of the game's character
+
+[optimization_hints]
+UWorld_Tick = "Thread actor ticking, batch process"
+AIPerformTask = "Spatial hash for neighbor queries"
+Pathfinding_Update = "Incremental updates, cache paths"
+Render_DrawActors = "Frustum culling, batching"
+QuestCheck_Perform = "Async evaluation, lazy checking"

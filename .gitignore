@@ -1,0 +1,39 @@
+# Dependencies
+/targets/*/config/
+/targets/*/build/
+**/*.pyc
+**/__pycache__
+**/node_modules/
+**/vendor/
+
+# Build artifacts
+/targets/*/target/
+/targets/*/out/
+**/*.exe
+**/*.dll
+**/*.so
+**/*.dylib
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Backup files
+*.bak
+*.backup
+
+# Secrets
+.env
+.env.local
+**/.env
