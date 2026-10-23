@@ -1,0 +1,65 @@
+[package]
+name = "game-opt-tool"
+version = "0.1.0"
+edition = "2021"
+description = "Reverse engineer and optimize game binaries for better performance"
+license = "MIT"
+authors = ["Your Name Here"]
+
+[dependencies]
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+clap_complete = "4.4"
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+toml = "0.8"
+
+# UUID for temporary files
+uuid = { version = "1.6", features = ["v4"] }
+
+# File system
+walkdir = "2.4"
+dirs = "5.0"
+uuid = "1.6"
+
+# Networking (for REA integration)
+reqwest = { version = "0.11", features = ["json"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Game-specific
+# Binary parsing
+goblin = "0.8"
+object = "0.35"
+# Memory reading
+memmap2 = "0.9"
+
+# Optimization
+# LLVM bindings for code generation (optional, for advanced use)
+# llvm-sys = "0.0"  # Requires LLVM development headers
+
+# Testing
+[dev-dependencies]
+criterion = "0.5"
+tempfile = "3.9"
+
+[[bench]]
+name = "benchmark"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

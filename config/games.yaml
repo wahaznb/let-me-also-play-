@@ -1,0 +1,119 @@
+# Game Optimization Config
+# Add your games here with their specific configurations
+
+games:
+  oblivion-remastered:
+    name: "The Elder Scrolls IV: Oblivion Remastered"
+    version: "1.0"
+    engine: "Unreal Engine 5"
+    binary_format: PE
+    architecture: X64
+    
+    hot_functions:
+      - name: "CharacterSkeletonUpdate"
+        estimated_impact: Critical
+      - name: "WeatherSystemUpdate"
+        estimated_impact: High
+      - name: "NPCPathfinding"
+        estimated_impact: High
+      - name: "ClothSimulation"
+        estimated_impact: Medium
+
+    quirks:
+      - name: "Sky Recomputation"
+        description: "Weather system rebuilds sun/sky/fog every frame unnecessarily"
+        function: "WeatherSystemUpdate"
+        condition: "Always runs each frame even if nothing changed"
+        preservation_required: false  # This is the bug we're fixing
+
+    optimization_hints:
+      CharacterSkeletonUpdate: "Use fast memory copy instead of byte-by-byte copy"
+      WeatherSystemUpdate: "Only rebuild weather when values actually change"
+      NPCPathfinding: "Implement spatial hashing for neighbor queries"
+
+  skyrim-se:
+    name: "The Elder Scrolls V: Skyrim Special Edition"
+    version: "1.6"
+    engine: "Creation Engine"
+    binary_format: PE
+    architecture: X64
+    
+    hot_functions:
+      - name: "QuestStageUpdate"
+        estimated_impact: Critical
+      - name: "CellStreaming"
+        estimated_impact: High
+      - name: "QuestManagerTick"
+        estimated_impact: High
+
+    quirks:
+      - name: "256MB Address Space"
+        description: "Game has a hardcoded 256MB address space limit"
+        function: "MemoryManager"
+        condition: "Always"
+        preservation_required: true  # This is a limitation we work around
+
+    optimization_hints:
+      QuestStageUpdate: "Batch quest stage updates"
+      CellStreaming: "Implement async streaming"
+
+  star-wars-jedi-survivor:
+    name: "Star Wars Jedi: Survivor"
+    version: "1.0"
+    engine: "Unreal Engine 4"
+    binary_format: PE
+    architecture: X64
+    
+    hot_functions:
+      - name: "GarbageCollection"
+        estimated_impact: Critical
+      - name: "TextureStreaming"
+        estimated_impact: High
+      - name: "PhysicsUpdate"
+        estimated_impact: Medium
+
+    quirks: []
+    optimization_hints:
+      GarbageCollection: "Reduce allocations in hot paths"
+      TextureStreaming: "Preload textures in advance"
+
+# Available optimization passes
+optimizations:
+  - name: "loop_unrolling"
+    description: "Unroll loops to reduce branch overhead"
+    enabled: true
+    parameters:
+      min_iterations: "4"
+      max_unroll: "8"
+  
+  - name: "simd_vectorization"
+    description: "Vectorize loops using SIMD instructions"
+    enabled: true
+    parameters:
+      target: "auto"
+  
+  - name: "cache_friendly_layout"
+    description: "Restructure data for better cache locality"
+    enabled: true
+    parameters:
+      strategy: "soa"
+  
+  - name: "constant_folding"
+    description: "Fold compile-time constants"
+    enabled: true
+    parameters: {}
+  
+  - name: "dead_code_elimination"
+    description: "Remove unreachable code"
+    enabled: true
+    parameters: {}
+  
+  - name: "function_inlining"
+    description: "Inline small functions"
+    enabled: true
+    parameters:
+      max_size: "50"
+
+# Quirk database (shared across games)
+quirks:
+  games: {}
