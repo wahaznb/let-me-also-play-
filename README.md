@@ -15,6 +15,7 @@
 | Backup with SHA-256 + JSON manifest | **Working, tested** |
 | Revert with checksum verification and atomic write | **Working, tested** |
 | Frame-time profiling from MangoHud CSV | **Working, tested against a real MangoHud log** |
+| A/B log comparison | **Working, tested** — deltas for average FPS, 1%/0.1% lows, p99, and stutter |
 | `analyze` | Detection plus real frame-time summary when a log is available; function hotspots are not implemented |
 | Verify | **Byte comparison only** — runtime equivalence is not implemented |
 | Decompilation | Skeleton; requires Ghidra + JDK |
@@ -108,6 +109,30 @@ The parser understands the metadata rows MangoHud writes before its
 falls back to the `fps` column if `frametime` is absent. Invalid rows are
 skipped; long frames are kept so loading stalls are not hidden.
 
+### Compare two runs
+
+Capture a baseline and a patched run of the same scene, then compare them:
+
+```bash
+./target/release/game-opt-tool compare \
+  --baseline /tmp/mangohud/before.csv \
+  --patched /tmp/mangohud/after.csv
+
+# Machine-readable, with the last 3600 frames of each log:
+./target/release/game-opt-tool compare \
+  --baseline /tmp/mangohud/before.csv \
+  --patched /tmp/mangohud/after.csv \
+  --frames 3600 --json
+```
+
+The comparison reports the observed change in average FPS, 1% low, 0.1% low,
+p99 frame time, and stutter ratio, and marks whether each change is better or
+worse in the metric's own direction. It warns about short runs, mismatched
+durations, tail trimming, and does not claim statistical significance. A real
+capture pair showed why this matters: uncapping the frame rate raised average
+FPS from `48.0` to `1382.8`, but stutter ratio worsened from `1.06x` to
+`58.71x`. Raw FPS alone would have hidden that regression.
+
 ### Metric definitions
 
 | Metric | Definition |
@@ -130,6 +155,7 @@ the one used for optimization comparisons.
 |---------|--------------------|
 | `analyze --game <path> [--log <csv>] [--log-dir <dir>]` | Detects format/architecture and prints measured frame-time statistics when a log is available |
 | `profile --game <path> [--log <csv>] [--log-dir <dir>] [--frames N] [--json]` | Computes real metrics from a MangoHud CSV; `--frames` analyzes only the last N frames |
+| `compare --baseline <csv> --patched <csv> [--frames N] [--json]` | Compares two measured runs and reports per-metric deltas with interpretation notes |
 | `optimize --game <path> --output <dir>` | Runs stub passes and writes a copy (placeholder speedups, clearly labeled) |
 | `patch --game <path> --output <file>` | Creates a backup if needed and writes a byte-identical copy |
 | `verify --original <a> --patched <b>` | Compares bytes; changed files fail until runtime verification exists |
@@ -164,6 +190,9 @@ Path → format/arch detection → config lookup → command
               SHA-256 + atomic
 
 MangoHud CSV → header discovery → frame times → avg / lows / percentiles / stutter
+                                              │
+                                              ▼
+                                     A/B compare (same scene)
 ```
 
 Planned pipeline (not implemented):
@@ -179,12 +208,13 @@ rewrite → patch → runtime A/B verification
 ~/.cargo/bin/cargo test
 ```
 
-Current suite: **59 unit tests + 17 end-to-end CLI tests**, all passing. They
+Current suite: **64 unit tests + 23 end-to-end CLI tests**, all passing. They
 cover SHA-256 NIST vectors, backup/restore round-trips, tampered and truncated
 backups, symlink refusal, permission preservation, PE/ELF/Mach-O magic
 detection, PE `MZ` detection, trampoline encoding and range checks, config
 parsing and name lookup, verifier truthfulness, MangoHud header/preamble and
-metric math, log discovery, and the real CLI backup → corrupt → revert flow.
+metric math, log discovery, A/B delta math and warnings, and the real CLI
+backup → corrupt → revert flow.
 
 The real-world checks include:
 
@@ -193,6 +223,9 @@ The real-world checks include:
 - A genuine 143-frame MangoHud log produced by `glxgears`: the tool reported
   average FPS `48.01` versus MangoHud's own summary `48.0`, average frame time
   `20.83 ms` versus `20.8 ms`, and the same `0.1%` low of `42.45 FPS`.
+- Two genuine MangoHud captures of the same workload: `compare` reported
+  average FPS `48.01 → 1382.81` but stutter ratio `1.06x → 58.71x`, correctly
+  flagging the raw-FPS gain as a consistency regression.
 
 ## Legal
 
