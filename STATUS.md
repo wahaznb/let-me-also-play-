@@ -1,38 +1,53 @@
 # Game Opt Tool — Verified Status
 
-Last verified: 2026-10-24, commit `4b19b77` + local changes.
+Last verified: 2026-10-24. Baseline commit `930349b`; this document includes
+the MangoHud frame-time ingestion work built on top of it.
 
 ## One-line summary
 
-Binary detection, config loading, backup/revert, `doctor`, and byte-level
-verification are implemented and tested. Profiling, decompilation, optimization,
-and real binary patching are still placeholders and are labelled as such in the
-CLI.
+Binary detection, config loading, backup/revert, `doctor`, byte-level
+verification, and real frame-time measurement from MangoHud CSV logs are
+implemented and tested. Decompilation, function-level profiling, optimization,
+and binary rewriting are still placeholders and are labelled as such.
 
 ## Test evidence
 
 ```bash
-~/.cargo/bin/cargo test
-# 42 unit tests + 8 end-to-end CLI tests — all passing
+~/.cargo/bin/cargo test --all-targets
+# 59 unit tests + 17 end-to-end CLI tests — all passing
 
 ~/.cargo/bin/cargo build --release --bins
-# 0 errors
+# 0 errors, 7 dead-code/style warnings
 ```
 
-Real-world check against `/path/to/your/game/DeusEx.exe`
+Real measurement check:
+
+- Generated a genuine MangoHud log by running `glxgears` for ~3 seconds:
+  143 measured frames.
+- `game-opt-tool profile --log-dir ...` reported average FPS `48.01`,
+  average frame time `20.83 ms`, 1% low `43.90 FPS`, 0.1% low `42.45 FPS`.
+- MangoHud's own summary for the same log reports average FPS `48.0`,
+  average frame time `20.8 ms`, and 0.1% minimum `42.45 FPS`.
+- The 1% number differs by definition: this tool averages the slowest 1% of
+  frame times; MangoHud's summary reports a single percentile. The tool states
+  its definition in the README and output.
+- The parser correctly skipped MangoHud's metadata preamble and ignored the
+  summary CSV during log discovery.
+
+Backup check against `/path/to/your/game/DeusEx.exe`
 (253,952 bytes, PE32/x86):
 
 1. `doctor --game` detected `DeusEx (PE, x86)` and a writable backup directory.
 2. `backup` created a manifest and a backup with SHA-256
    `3e6fdb89b880a60ee984b885a48f262070019572f1531ed70d96108781bae00e`.
-3. The working copy was overwritten with junk, then `revert` restored it.
+3. A copy was overwritten with junk, then `revert` restored it.
 4. `cmp` and `sha256sum` confirmed byte-for-byte equality with the original.
 
 ## What is real
 
 | Feature | Implementation |
 |---------|----------------|
-| PE detection | `MZ` header + `PE\0\0` signature at `e_lfanew` (previously checked `ME`, a bug) |
+| PE detection | `MZ` header + `PE\0\0` signature at `e_lfanew` |
 | ELF / Mach-O detection | Magic bytes, both Mach-O endiannesses |
 | Architecture detection | goblin PE/ELF machine types |
 | Config | `config/games.yaml` parsed as a full `Config`; fuzzy game-name lookup |
@@ -40,35 +55,46 @@ Real-world check against `/path/to/your/game/DeusEx.exe`
 | Revert | Checksum verification, symlink refusal, atomic temp+rename, read-back verification, permission preservation, dry-run |
 | Verify | SHA-256/byte comparison; changed binaries are reported as NOT VERIFIED |
 | Doctor | Config parse, Wine/MangoHud/Java/Ghidra presence, binary detection, writable backup dir, existing backups |
+| MangoHud ingestion | Streaming CSV parser; metadata preamble, BOM, CRLF, header variants, `fps` fallback |
+| Frame metrics | Average/min/max FPS, 1% and 0.1% lows, median/p95/p99 frame time, duration, stutter ratio |
+| Log discovery | Newest `.csv`/`.log` in a directory whose header contains `frametime` or `fps` |
+| Measurement output | Human-readable text or `--json`; `--frames N` analyzes the last N frames |
 
 ## What is still a stub
 
 | Feature | Current behavior |
 |---------|------------------|
-| `profile` | Returns hardcoded numbers and prints a warning |
-| `analyze` hot functions | Hardcoded names/percentages and prints a warning |
-| `optimize` | Prepends marker comments in memory; no code generation |
+| `analyze` hot functions | Not implemented; analyze reports measured frame times only and says so |
+| `optimize` | Stub passes; speedup values are placeholders |
 | `patch` | Writes a byte-identical copy; refuses in-place writes without a backup |
 | `verify` runtime behavior | Not implemented; only bytes are compared |
 | Decompilation | Requires Ghidra + Java, neither installed here |
+| Launch automation | The user launches the game under MangoHud manually |
 
-## Fixed in this pass
+## Fixed in the measurement pass
 
-- `GameInfo::load_config()` no longer parses `games.yaml` as a single game;
-  it parses `Config` and looks the game up. `analyze` therefore completes.
-- `Config::load()` now picks YAML/TOML by extension instead of parsing YAML
-  with the TOML parser.
-- PE detection used `M`/`E` instead of `M`/`Z`; fixed and unit-tested.
-- Clap's built-in `help` subcommand collided with the custom `Help` variant in
-  debug builds; `disable_help_subcommand` fixes it.
-- `optimize --output <dir>` previously passed a directory to the patcher as if
-  it were a file; it now resolves to `<dir>/<game exe>`.
-- The verifier no longer fabricates a +25% gain or an unconditional PASS.
-- Replaced stale docs that claimed a working pipeline and measured 2× gains.
+- Removed the synthetic frame-time generator; `profile` now requires a real
+  MangoHud log and prints instructions when none exists.
+- Removed hardcoded hot-function percentages from `analyze`; it no longer
+  presents invented function data as measurement.
+- Added streaming parsing so large logs do not need to fit in memory.
+- Handles MangoHud metadata preamble rows before the CSV header, discovered by
+  testing against a genuine log.
+- Retains long frames instead of silently dropping stalls; rejects
+  non-finite/overflowing statistics.
+- Added `--frames` tail analysis and `--json` output.
 
 ## Known limitations
 
-- No frame-time measurement yet (MangoHud CSV ingestion is not implemented).
+- No function-level profiling. Frame times alone cannot identify which
+  function is hot; that needs CPU sampling or instrumentation.
+- No A/B comparison of two runs yet. The metrics are ready for it; the
+  comparison command is not written.
+- No automatic game launch or save-state handling.
+- 1% low is defined as the mean of the slowest 1% of frames, which differs
+  from tools that report a single percentile.
+- MangoHud must be able to overlay the game; anti-cheat or unsupported
+  renderers can block capture. Deus Ex under Wine is the intended path.
 - No Ghidra/JDK installed, so decompilation is untested end-to-end.
 - No real patch code generation, no code caves, no relocation handling.
 - Restore-over-existing on Windows is remove-then-rename rather than atomic.
@@ -79,15 +105,16 @@ Real-world check against `/path/to/your/game/DeusEx.exe`
 
 ## Next steps, in priority order
 
-1. **Real measurement first.** Ingest MangoHud CSV logs produced under Wine and
-   compute avg / 1% low / p99 frame times, stutter ratio, and run-to-run
-   confidence. Replace all placeholder profiler values.
+1. **A/B frame-time comparison.** Accept two MangoHud logs and report deltas
+   for average FPS, 1% low, 0.1% low, p99, and stutter ratio, with a clear
+   warning when the runs are too short for stable lows.
 2. **Decompilation.** Install JDK 21 + Ghidra, validate headless mode under
-   `xvfb-run`, and cache function lists per binary hash.
+   `xvfb-run`, and cache function lists per binary hash. Blocked until those
+   tools are installed.
 3. **Real patching.** PE section parsing, code caves, relocations, and a patch
    manifest that records every modified byte range for precise rollback.
 4. **Runtime A/B verification.** Launch original and patched builds with the
-   same save file, compare screenshots/state at checkpoints, and gate patches
-   on measured frame-time consistency (1% lows before raw FPS).
+   same save file, compare frame-time distributions, and gate patches on
+   measured 1% lows before raw FPS.
 5. **Crash-safe experiment loop.** If the patched build fails to start, offer
    one-command revert automatically.

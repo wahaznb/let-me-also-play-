@@ -1,6 +1,6 @@
 # Prerequisites
 
-## Required for the features that actually work today
+## Required for the safety and inspection features
 
 `doctor`, `analyze`, `backup`, `revert`, and `verify` need:
 
@@ -14,16 +14,28 @@
 
 The tool never downloads anything at runtime and does not contain telemetry.
 
-## Optional, for features that are not implemented yet
+## Required for frame-time measurement
+
+`profile` and `analyze --log` read MangoHud CSV logs. To produce those logs for
+a Windows game you also need:
 
 | Tool | Needed for | Status on this machine |
 |------|------------|------------------------|
 | Wine 11.x | launching Windows builds | installed (`/usr/bin/wine`) |
 | MangoHud / mangoapp | frame-time capture | installed (`/usr/bin/mangohud`) |
+
+For a native Linux game, Wine is not needed; launch the game through
+`mangohud` directly.
+
+## Optional, for features that are not implemented yet
+
+| Tool | Needed for | Status on this machine |
+|------|------------|------------------------|
 | Ghidra 11.x+ | headless decompilation | **not installed** |
 | JDK 21 | running Ghidra | **not installed** |
 
-`game-opt-tool doctor` reports all of the above.
+`game-opt-tool doctor` reports all of the above. It exits non-zero only when a
+required safety/inspection check fails; missing Java/Ghidra are warnings.
 
 ### Install on CachyOS / Arch
 
@@ -55,9 +67,6 @@ The binary is `target/release/game-opt-tool`.
 ./target/release/game-opt-tool doctor --game "/path/to/your/game"
 ```
 
-`doctor` exits non-zero only when a required check fails. Missing optional
-tools (Java, Ghidra) are warnings.
-
 ## Low-friction workflow
 
 ```bash
@@ -74,7 +83,27 @@ cp "/path/to/your/game/DeusEx.exe" /tmp/DeusEx.exe
 # 4. Preview and then perform a restore.
 ./target/release/game-opt-tool revert --game /tmp/DeusEx.exe --dry-run
 ./target/release/game-opt-tool revert --game /tmp/DeusEx.exe
+
+# 5. Measure a run: capture once, then analyze the newest log.
+mkdir -p /tmp/mangohud
+cd "/path/to/your/game"
+MANGOHUD_CONFIG="output_folder=/tmp/mangohud,autostart_log=1,log_duration=0" \
+  mangohud --dlsym wine DeusEx.exe
+
+cd /path/to/game-opt-tool
+./target/release/game-opt-tool profile \
+  --game "/path/to/your/game/DeusEx.exe" \
+  --log-dir /tmp/mangohud
 ```
+
+`log_duration=0` means "keep logging until the game exits". `autostart_log=1`
+starts capture without opening the MangoHud menu. Use the `mangohud` wrapper
+rather than setting `MANGOHUD=1` by hand so the correct layer is loaded.
+
+For Deus Ex, start the game from its `System` directory so it can find its
+data files. MangoHud writes a detailed CSV plus a `_summary.csv`; the tool
+selects the detailed log by checking for a `frametime` or `fps` header and
+ignores the summary file.
 
 Backups are named `<file>.<sha256-prefix>.<timestamp>.bak` with a matching
 `.bak.json` manifest. A restore refuses to run if the backup no longer matches
@@ -85,6 +114,10 @@ cannot leave a half-written executable.
 
 | Symptom | Meaning / fix |
 |---------|----------------|
+| `No MangoHud CSV logs found` | No log exists in the directory yet, or MangoHud could not inject. Check that the log directory contains a CSV whose header includes `fps,frametime`. |
+| MangoHud overlay does not appear | The renderer may not be supported, or the game runs in a mode MangoHud cannot hook. Try `mangohud --dlsym <command>`; for Wine use `mangohud --dlsym wine <game.exe>`. |
+| `No MangoHud header found` | The file is not a MangoHud frame log (or is truncated). The tool skips MangoHud metadata rows but needs a `fps` or `frametime` header. |
+| 1% low differs from MangoHud's summary | By design: this tool averages the slowest 1% of frame times; MangoHud's summary reports a percentile. See the README metric definitions. |
 | `invalid type: map, expected a sequence` | Old build. Fixed: `config/games.yaml` is parsed as a full config, then looked up by game name. |
 | `No backups found` | Run `backup --game <file>` first. Backups only exist for files backed up by this tool. |
 | `Backup checksum mismatch` | The `.bak` file was modified or corrupted. Restore refuses on purpose; use another backup or the original media. |
