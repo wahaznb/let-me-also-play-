@@ -1,15 +1,117 @@
-//! Ghidra integration for decompilation
+//! Ghidra headless decompilation.
 //!
-//! Uses Ghidra's headless mode to decompile game binaries
+//! This module runs Ghidra's `analyzeHeadless` with a small Java post-script,
+//! imports the game binary into a temporary project, decompiles exactly one
+//! function, and parses the script's result file. There is no placeholder
+//! pseudocode: if Ghidra fails or produces no result, the command fails.
 
 use crate::game::GameInfo;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use tracing::{info, warn, error};
+use std::process::Stdio;
+use std::time::Duration;
+use tokio::process::Command;
+use tracing::{info, warn};
 
-/// Decompiled function
+/// Ghidra's default project name inside the temporary project directory.
+const GHIDRA_PROJECT_NAME: &str = "GameOptProject";
+
+/// Hard limit for a single headless decompilation.
+const GHIDRA_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// The Java post-script embedded in the binary.
+///
+/// It writes a line-oriented result file instead of relying on Ghidra's log
+/// output, which also contains analysis messages. The format is intentionally
+/// simple so the Rust side can parse it without a Java/JSON dependency.
+const DECOMPILE_SCRIPT: &str = r#"
+import ghidra.app.script.GhidraScript;
+import ghidra.app.decompiler.DecompInterface;
+import ghidra.app.decompiler.DecompileResults;
+import ghidra.program.model.address.Address;
+import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.Instruction;
+import ghidra.program.model.listing.InstructionIterator;
+import ghidra.program.model.listing.Parameter;
+import ghidra.util.task.ConsoleTaskMonitor;
+import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
+
+public class GameOptDecompile extends GhidraScript {
+    @Override
+    public void run() throws Exception {
+        String[] args = getScriptArgs();
+        if (args.length < 2) {
+            throw new IllegalArgumentException("usage: <address> <output-file>");
+        }
+
+        Address address = toAddr(args[0]);
+        if (address == null) {
+            throw new RuntimeException("Invalid address: " + args[0]);
+        }
+
+        Function function = getFunctionAt(address);
+        if (function == null) {
+            function = getFunctionContaining(address);
+        }
+        if (function == null) {
+            throw new RuntimeException("No function found at " + address);
+        }
+
+        DecompInterface decompiler = new DecompInterface();
+        decompiler.toggleCCode(true);
+        decompiler.toggleSyntaxTree(true);
+        decompiler.setSimplificationStyle("decompile");
+        if (!decompiler.openProgram(currentProgram)) {
+            throw new RuntimeException("Could not open program in decompiler");
+        }
+
+        DecompileResults results = decompiler.decompileFunction(
+            function, 120, new ConsoleTaskMonitor());
+        if (!results.decompileCompleted()) {
+            throw new RuntimeException("Decompilation failed: " + results.getErrorMessage());
+        }
+
+        String pseudocode = results.getDecompiledFunction().getC();
+        String signature = function.getPrototypeString(false, false);
+        String returnType = function.getReturnType().getName();
+
+        try (PrintWriter out = new PrintWriter(args[1], StandardCharsets.UTF_8)) {
+            out.println("GAME_OPT_NAME\t" + clean(function.getName()));
+            out.println("GAME_OPT_ENTRY\t" + function.getEntryPoint());
+            out.println("GAME_OPT_SIGNATURE\t" + clean(signature));
+            out.println("GAME_OPT_RETURN\t" + clean(returnType));
+            for (Parameter parameter : function.getParameters()) {
+                out.println("GAME_OPT_PARAM\t" + clean(
+                    parameter.getDataType().getName() + " " + parameter.getName()));
+            }
+
+            out.println("GAME_OPT_PSEUDO_BEGIN");
+            out.println(pseudocode);
+            out.println("GAME_OPT_PSEUDO_END");
+
+            out.println("GAME_OPT_ASM_BEGIN");
+            InstructionIterator instructions = currentProgram.getListing()
+                .getInstructions(function.getBody(), true);
+            while (instructions.hasNext()) {
+                Instruction instruction = instructions.next();
+                out.println(instruction.getAddress() + "\t" + clean(instruction.toString()));
+            }
+            out.println("GAME_OPT_ASM_END");
+        }
+    }
+
+    private String clean(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.replace('\t', ' ').replace('\r', ' ').replace('\n', ' ');
+    }
+}
+"#;
+
+/// One decompiled function.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecompiledFunction {
     pub name: String,
@@ -21,217 +123,661 @@ pub struct DecompiledFunction {
     pub return_type: String,
 }
 
-/// Decompiler that uses Ghidra
+/// Decompiler that uses Ghidra's headless analyzer.
 pub struct Decompiler {
     ghidra_path: PathBuf,
     java_home: Option<PathBuf>,
 }
 
 impl Decompiler {
-    /// Create a new decompiler
+    /// Create a new decompiler and validate the surrounding tools.
     pub fn new() -> Result<Self> {
-        // Try to find Ghidra
         let ghidra_path = Self::find_ghidra()?;
+        info!("Using Ghidra at: {}", ghidra_path.display());
 
-        info!("Using Ghidra at: {:?}", ghidra_path);
+        let java_home = std::env::var_os("JAVA_HOME").map(PathBuf::from);
+        if let Some(home) = &java_home {
+            if !home.join("bin").join("java").is_file() {
+                bail!("JAVA_HOME does not contain bin/java: {}", home.display());
+            }
+            if let Some(required) = required_java_version(&ghidra_path)
+                .and_then(|version| version.parse::<u32>().ok())
+            {
+                if let Some(actual) = java_major_version(home) {
+                    if actual < required {
+                        bail!(
+                            "JAVA_HOME is Java {}, but the installed Ghidra requires Java {}",
+                            actual,
+                            required
+                        );
+                    }
+                }
+            }
+            if !home.join("bin").join("javac").is_file() {
+                warn!("JAVA_HOME looks like a JRE (no bin/javac); Ghidra requires a full JDK");
+            }
+        }
 
         Ok(Self {
             ghidra_path,
-            java_home: std::env::var("JAVA_HOME").ok().map(PathBuf::from),
+            java_home,
         })
     }
 
-    /// Find Ghidra installation
+    /// Find a Ghidra installation.
     fn find_ghidra() -> Result<PathBuf> {
-        // Check environment variable first
-        if let Ok(path) = std::env::var("GHIDRA_INSTALL_DIR") {
-            let p = PathBuf::from(path);
-            if p.join("support").join("analyze").exists() {
-                return Ok(p);
+        if let Some(dir) = std::env::var_os("GHIDRA_INSTALL_DIR") {
+            let path = PathBuf::from(dir);
+            if is_ghidra_install(&path) {
+                return Ok(path);
             }
+            bail!(
+                "GHIDRA_INSTALL_DIR is set to {}, but it does not contain \
+                 support/analyzeHeadless",
+                path.display()
+            );
         }
 
-        // Check common installation locations
-        let candidates = vec![
-            "/opt/ghidra",
-            "/usr/local/ghidra",
-            "~/ghidra",
-            "C:\\Program Files\\Ghidra",
+        let mut candidates = vec![
+            PathBuf::from("/opt/ghidra"),
+            PathBuf::from("/usr/local/ghidra"),
+            PathBuf::from("/usr/share/ghidra"),
         ];
+        if let Some(home) = dirs::home_dir() {
+            candidates.push(home.join("ghidra"));
+            candidates.push(home.join(".local").join("share").join("ghidra"));
+        }
+        #[cfg(windows)]
+        candidates.push(PathBuf::from(r"C:\Program Files\Ghidra"));
 
         for candidate in candidates {
-            let expanded = candidate.replace("~", dirs::home_dir().unwrap_or_default().to_string_lossy().as_ref());
-            let p = PathBuf::from(expanded);
-            if p.join("support").join("analyze").exists() {
-                return Ok(p);
+            if is_ghidra_install(&candidate) {
+                return Ok(candidate);
             }
         }
 
-        Err(anyhow::anyhow!(
-            "Ghidra not found. Please install Ghidra and set GHIDRA_INSTALL_DIR environment variable."
-        ))
+        bail!(
+            "Ghidra not found. Set GHIDRA_INSTALL_DIR to the installation \
+             directory that contains support/analyzeHeadless."
+        )
     }
 
-    /// Get the Ghidra script path
-    fn ghidra_scripts_path(&self) -> PathBuf {
-        self.ghidra_path.join("support").join("analyze")
+    /// Path to the platform-specific headless launcher.
+    fn analyze_headless_path(&self) -> PathBuf {
+        let name = if cfg!(windows) {
+            "analyzeHeadless.bat"
+        } else {
+            "analyzeHeadless"
+        };
+        self.ghidra_path.join("support").join(name)
     }
 
-    /// Decompile a specific function
+    /// Decompile the binary's entry point.
+    pub async fn decompile_entry(&self, game: &GameInfo) -> Result<DecompiledFunction> {
+        let address = entry_point(game)?;
+        self.decompile_function(game, address).await
+    }
+
+    /// Decompile the function containing `address`.
     pub async fn decompile_function(
         &self,
-        game_info: &GameInfo,
-        function_address: u64,
+        game: &GameInfo,
+        address: u64,
     ) -> Result<DecompiledFunction> {
-        info!("Decompiling function at 0x{:X}", function_address);
+        info!("Decompiling 0x{:X} from {}", address, game.path.display());
 
-        // Create a temporary Ghidra project
-        let project_dir = std::env::temp_dir().join(format!("game-opt-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&project_dir)?;
-
-        // Run Ghidra headless analyzer
-        let analyze_script = self.ghidra_scripts_path().join("analyzeHeadless");
-        
-        let output = Command::new(&analyze_script)
-            .arg(&project_dir)
-            .arg("true")
-            .arg("-import")
-            .arg(&game_info.path)
-            .arg("-projectName")
-            .arg("temp")
-            .arg("-scriptPath")
-            .arg(self.ghidra_scripts_path().join("auto_analysis"))
-            .arg("-postScript")
-            .arg(self.create_decompile_script(function_address)?)
-            .output()
-            .context("Failed to run Ghidra headless analyzer")?;
-
-        if !output.status.success() {
-            error!("Ghidra analysis failed: {}", String::from_utf8_lossy(&output.stderr));
+        let workspace =
+            std::env::temp_dir().join(format!("game-opt-ghidra-{}", uuid::Uuid::new_v4()));
+        let project_dir = workspace.join("project");
+        let script_dir = workspace.join("scripts");
+        let output_path = workspace.join("decompiled.txt");
+        std::fs::create_dir(&workspace).with_context(|| {
+            format!("Failed to create Ghidra workspace {}", workspace.display())
+        })?;
+        let setup = (|| -> Result<()> {
+            std::fs::create_dir(&project_dir).with_context(|| {
+                format!(
+                    "Failed to create Ghidra project directory {}",
+                    project_dir.display()
+                )
+            })?;
+            std::fs::create_dir(&script_dir)?;
+            std::fs::write(script_dir.join("GameOptDecompile.java"), DECOMPILE_SCRIPT)
+                .context("Failed to write the Ghidra decompile script")?;
+            Ok(())
+        })();
+        if let Err(error) = setup {
+            let _ = std::fs::remove_dir_all(&workspace);
+            return Err(error);
         }
 
-        // Parse the output to extract decompiled code
-        // This is simplified - a real implementation would parse Ghidra's XML/JSON output
-        let pseudocode = self.parse_decompile_output(&project_dir, function_address).await?;
+        let mut command = self.headless_command();
+        command
+            .arg(&project_dir)
+            .arg(GHIDRA_PROJECT_NAME)
+            .arg("-import")
+            .arg(&game.path)
+            .arg("-overwrite")
+            .arg("-scriptPath")
+            .arg(&script_dir)
+            .arg("-postScript")
+            .arg("GameOptDecompile.java")
+            .arg(format!("0x{:X}", address))
+            .arg(&output_path)
+            .arg("-deleteProject")
+            .current_dir(&workspace)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
 
-        Ok(DecompiledFunction {
-            name: format!("func_0x{:X}", function_address),
-            address: function_address,
-            pseudocode,
-            assembly: String::new(), // Would come from disassembly
-            signature: String::new(),
-            parameters: vec![],
-            return_type: String::new(),
-        })
+        if let Some(java_home) = &self.java_home {
+            command.env("JAVA_HOME", java_home);
+            prepend_path(&mut command, &java_home.join("bin"));
+        }
+
+        let run = tokio::time::timeout(GHIDRA_TIMEOUT, command.output()).await;
+        let result = match run {
+            Ok(Ok(output)) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                self.interpret_output(address, output.status, &stdout, &stderr, &output_path)
+            }
+            Ok(Err(error)) => Err(error).context("Failed to run Ghidra headless analyzer"),
+            Err(_) => Err(anyhow::anyhow!(
+                "Ghidra headless timed out after {} seconds",
+                GHIDRA_TIMEOUT.as_secs()
+            )),
+        };
+
+        // The temporary project can be large; never leave it behind.
+        let _ = std::fs::remove_dir_all(&workspace);
+
+        result
     }
 
-    /// Create a Ghidra script for decompilation
-    fn create_decompile_script(
-        &self,
-        function_address: u64,
-    ) -> Result<PathBuf> {
-        let script_path = std::env::temp_dir().join(format!("decompile_0x{:X}.py", function_address));
-        
-        let script_content = format!(
-            r#"
-from ghidra.program.model.listing import Function
-from ghidra.util.task import ConsoleTaskMonitor
-
-# Get the current program
-program = currentProgram
-
-# Find the function at the specified address
-addr = program.getAddressFactory().getAddress("0x{:X}")
-functions = program.getFunctionManager().getFunctions(addr, True)
-
-if functions.hasNext():
-    func = functions.next()
-    println("Found function: " + func.getName())
-    
-    # Get the decompiler
-    decompiler = tool.getService(class com.github.javaparser.JavaParser)
-    if decompiler:
-        code = decompiler.decompile(func, 0)
-        println("=== DECOMPILATION ===")
-        println(code.getDecompiledFunction().toString())
-        println("=== END DECOMPILATION ===")
-else:
-    println("Function not found at address 0x{:X}", addr)
-"#,
-            function_address, function_address
-        );
-
-        std::fs::write(&script_path, script_content)?;
-        Ok(script_path)
+    /// Build the headless command, wrapping `.bat` files on Windows.
+    fn headless_command(&self) -> Command {
+        #[cfg(windows)]
+        {
+            let mut command = Command::new("cmd");
+            command.arg("/C").arg(self.analyze_headless_path());
+            command
+        }
+        #[cfg(not(windows))]
+        {
+            Command::new(self.analyze_headless_path())
+        }
     }
 
-    /// Parse decompile output
-    async fn parse_decompile_output(
+    fn interpret_output(
         &self,
-        project_dir: &Path,
-        _function_address: u64,
-    ) -> Result<String> {
-        // Look for decompile output files
-        let output_dirs = vec![
-            project_dir.join("temp").join("logs"),
-            project_dir.join("temp").join("scripts"),
-        ];
+        address: u64,
+        status: std::process::ExitStatus,
+        stdout: &str,
+        stderr: &str,
+        output_path: &Path,
+    ) -> Result<DecompiledFunction> {
+        let log = tail(stdout, stderr);
 
-        for dir in &output_dirs {
-            if dir.exists() {
-                if let Ok(entries) = std::fs::read_dir(dir) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.extension().map(|e| e == "log") == Some(true) {
-                            if let Ok(content) = std::fs::read_to_string(&path) {
-                                if content.contains("DECOMPILATION") {
-                                    return Ok(content);
-                                }
-                            }
-                        }
+        if let Ok(content) = std::fs::read_to_string(output_path) {
+            match parse_decompile_output(&content) {
+                Ok(function) => {
+                    if !status.success() {
+                        warn!("Ghidra exited with {} but produced a valid result", status);
                     }
+                    return Ok(function);
+                }
+                Err(error) => {
+                    let hint = self.start_hint(&log, "");
+                    bail!(
+                        "Ghidra output could not be parsed: {:#}{}\nGhidra log tail:\n{}",
+                        error,
+                        hint,
+                        log
+                    );
                 }
             }
         }
 
-        // Return placeholder if no output found
-        Ok("// Decompiled code would be here\n// This requires Ghidra to be properly configured"
-            .to_string())
+        let hint = self.start_hint(stdout, stderr);
+        bail!(
+            "Ghidra produced no decompilation result for address 0x{:X}.{}\n{}",
+            address,
+            hint,
+            log
+        )
     }
 
-    /// Find hot functions using Ghidra
+    /// Explain the common Ghidra/JDK startup failures.
+    fn start_hint(&self, stdout: &str, stderr: &str) -> String {
+        let combined = format!("{}\n{}", stdout, stderr);
+        let required = required_java_version(&self.ghidra_path)
+            .map(|version| format!(" This Ghidra release requires Java {version}."))
+            .unwrap_or_default();
+
+        if combined.contains("unsupported java version")
+            || combined.contains("Unable to prompt user for JDK path")
+            || combined.contains("Failed to find a supported JDK")
+        {
+            format!(
+                "\nGhidra rejected the configured Java.{required} Set JAVA_HOME to a full JDK \
+                 (not a JRE)."
+            )
+        } else {
+            String::new()
+        }
+    }
+
+    /// Decompile functions requested as comma-separated `0x...` addresses.
+    ///
+    /// Name-based lookup is intentionally not guessed; an unknown name is
+    /// reported and skipped rather than silently decompiling the wrong code.
     pub async fn find_hot_functions(
         &self,
         game_path: &Path,
         specific_functions: Option<&str>,
     ) -> Result<Vec<DecompiledFunction>> {
-        info!("Finding hot functions in: {:?}", game_path);
+        info!("Finding hot functions in: {}", game_path.display());
 
+        let Some(specification) = specific_functions else {
+            warn!(
+                "No specific functions requested; automatic hot-function discovery \
+                 is not implemented"
+            );
+            return Ok(Vec::new());
+        };
+
+        let game = GameInfo::from_path(game_path)?;
         let mut functions = Vec::new();
 
-        // If specific functions are requested, decompile those
-        if let Some(funcs_str) = specific_functions {
-            for func in funcs_str.split(',') {
-                let func = func.trim();
-                if func.starts_with('0') && func.contains('x') {
-                    // Address format (0x1234)
-                    let addr = u64::from_str_radix(&func[2..], 16)?;
-                    let decompiled = self.decompile_function(
-                        &GameInfo::from_path(game_path)?,
-                        addr,
-                    ).await?;
-                    functions.push(decompiled);
-                } else {
-                    // Name format - search in binary
-                    warn!("Name-based lookup not yet implemented for: {}", func);
-                }
+        for requested in specification.split(',') {
+            let requested = requested.trim();
+            if requested.is_empty() {
+                continue;
             }
-        } else {
-            // Use config to find known hot functions
-            // This would be expanded based on the detected game
-            warn!("No specific functions requested; automatic hot-function discovery is not implemented");
+            if !requested.starts_with("0x") && !requested.starts_with("0X") {
+                warn!(
+                    "Name-based lookup is not implemented; use a hex address for: {}",
+                    requested
+                );
+                continue;
+            }
+            let address = parse_hex_address(requested)?;
+            functions.push(self.decompile_function(&game, address).await?);
         }
 
         Ok(functions)
+    }
+}
+
+pub fn is_ghidra_install(path: &Path) -> bool {
+    path.join("support").join("analyzeHeadless").is_file()
+        || path.join("support").join("analyzeHeadless.bat").is_file()
+}
+
+fn prepend_path(command: &mut Command, directory: &Path) {
+    if let Some(existing) = std::env::var_os("PATH") {
+        let mut paths = vec![directory.to_path_buf()];
+        paths.extend(std::env::split_paths(&existing));
+        if let Ok(joined) = std::env::join_paths(paths) {
+            command.env("PATH", joined);
+            return;
+        }
+    }
+    command.env("PATH", directory);
+}
+
+/// Determine the entry point from the binary itself.
+pub fn entry_point(game: &GameInfo) -> Result<u64> {
+    let data = std::fs::read(&game.path)
+        .with_context(|| format!("Failed to read {}", game.path.display()))?;
+    let object = goblin::Object::parse(&data)
+        .with_context(|| format!("Failed to parse {}", game.path.display()))?;
+
+    match object {
+        goblin::Object::PE(pe) => (pe.image_base as u64)
+            .checked_add(pe.entry as u64)
+            .context("PE entry point overflowed"),
+        goblin::Object::Elf(elf) => Ok(elf.entry),
+        goblin::Object::Mach(goblin::mach::Mach::Binary(macho)) => Ok(macho.entry),
+        goblin::Object::Mach(_) => {
+            bail!("Fat Mach-O binaries have no single entry point; pass --address")
+        }
+        _ => bail!(
+            "Cannot determine an entry point for {}; pass --address",
+            game.path.display()
+        ),
+    }
+}
+
+/// Parse `0x1234` or bare hexadecimal into an address.
+pub fn parse_hex_address(value: &str) -> Result<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        bail!("Address is empty; expected hexadecimal, e.g. 0x00401000");
+    }
+    let hex = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    if hex.is_empty() {
+        bail!("Address is empty; expected hexadecimal, e.g. 0x00401000");
+    }
+    u64::from_str_radix(hex, 16).with_context(|| format!("Invalid hexadecimal address: {}", value))
+}
+
+/// Required Java major version from Ghidra's application.properties.
+pub fn required_java_version(ghidra_dir: &Path) -> Option<String> {
+    let properties =
+        std::fs::read_to_string(ghidra_dir.join("Ghidra").join("application.properties")).ok()?;
+    properties
+        .lines()
+        .find_map(|line| line.strip_prefix("application.java.min="))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Read the Java major version from a JDK's `release` file.
+///
+/// Returns `None` when the file or field is missing, or the value is not a
+/// recognizable version. It does not execute Java.
+pub fn java_major_version(java_home: &Path) -> Option<u32> {
+    let release = std::fs::read_to_string(java_home.join("release")).ok()?;
+    let version = release
+        .lines()
+        .find_map(|line| line.strip_prefix("JAVA_VERSION="))?
+        .trim()
+        .trim_matches('"');
+    let first = version.split(['.', '-', '+']).next()?;
+    if first == "1" {
+        version.split('.').nth(1)?.parse().ok()
+    } else {
+        first.parse().ok()
+    }
+}
+
+fn parse_decompile_output(content: &str) -> Result<DecompiledFunction> {
+    let mut name: Option<String> = None;
+    let mut address: Option<u64> = None;
+    let mut signature = String::new();
+    let mut return_type = String::new();
+    let mut parameters = Vec::new();
+    let mut pseudocode = String::new();
+    let mut assembly_lines = Vec::new();
+    let mut in_pseudocode = false;
+    let mut in_assembly = false;
+    let mut saw_pseudocode = false;
+    let mut saw_assembly = false;
+
+    for line in content.lines() {
+        if in_pseudocode {
+            if line == "GAME_OPT_PSEUDO_END" {
+                in_pseudocode = false;
+            } else {
+                pseudocode.push_str(line);
+                pseudocode.push('\n');
+            }
+            continue;
+        }
+        if in_assembly {
+            if line == "GAME_OPT_ASM_END" {
+                in_assembly = false;
+            } else if let Some((instruction_address, text)) = line.split_once('\t') {
+                assembly_lines.push(format!("{}: {}", instruction_address, text));
+            } else if !line.trim().is_empty() {
+                assembly_lines.push(line.to_string());
+            }
+            continue;
+        }
+
+        if line == "GAME_OPT_PSEUDO_BEGIN" {
+            saw_pseudocode = true;
+            in_pseudocode = true;
+        } else if line == "GAME_OPT_ASM_BEGIN" {
+            saw_assembly = true;
+            in_assembly = true;
+        } else if let Some(value) = line.strip_prefix("GAME_OPT_NAME\t") {
+            name = Some(value.to_string());
+        } else if let Some(value) = line.strip_prefix("GAME_OPT_ENTRY\t") {
+            address = Some(parse_hex_address(value)?);
+        } else if let Some(value) = line.strip_prefix("GAME_OPT_SIGNATURE\t") {
+            signature = value.to_string();
+        } else if let Some(value) = line.strip_prefix("GAME_OPT_RETURN\t") {
+            return_type = value.to_string();
+        } else if let Some(value) = line.strip_prefix("GAME_OPT_PARAM\t") {
+            parameters.push(value.to_string());
+        }
+    }
+
+    if in_pseudocode {
+        bail!("Ghidra output ended before the pseudocode end marker");
+    }
+    if in_assembly {
+        bail!("Ghidra output ended before the assembly end marker");
+    }
+    if !saw_pseudocode {
+        bail!("Ghidra output has no pseudocode section");
+    }
+    if !saw_assembly {
+        bail!("Ghidra output has no assembly section");
+    }
+
+    let name = name.context("Ghidra output is missing the function name")?;
+    if name.trim().is_empty() {
+        bail!("Ghidra returned an empty function name");
+    }
+    let address = address.context("Ghidra output is missing the function entry address")?;
+    let pseudocode = pseudocode.trim().to_string();
+    if pseudocode.is_empty() {
+        bail!("Ghidra returned empty pseudocode for {}", name);
+    }
+
+    Ok(DecompiledFunction {
+        name,
+        address,
+        pseudocode,
+        assembly: assembly_lines.join("\n"),
+        signature,
+        parameters,
+        return_type,
+    })
+}
+
+/// Last part of Ghidra's log, safe for multi-byte UTF-8.
+fn tail(stdout: &str, stderr: &str) -> String {
+    let combined = format!("{}\n{}", stdout.trim_end(), stderr.trim_end());
+    let lines: Vec<&str> = combined.lines().collect();
+    let start = lines.len().saturating_sub(40);
+    lines[start..].join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = "\
+GAME_OPT_NAME\tentry
+GAME_OPT_ENTRY\t109214b6
+GAME_OPT_SIGNATURE\tundefined entry(void)
+GAME_OPT_RETURN\tundefined
+GAME_OPT_PARAM\tint argc
+GAME_OPT_PARAM\tchar ** argv
+GAME_OPT_PSEUDO_BEGIN
+
+void entry(void)
+{
+  return;
+}
+GAME_OPT_PSEUDO_END
+GAME_OPT_ASM_BEGIN
+109214b6\tPUSH EBP
+109214b7\tMOV EBP,ESP
+GAME_OPT_ASM_END
+";
+
+    #[test]
+    fn parses_a_complete_ghidra_result() {
+        let function = parse_decompile_output(SAMPLE).unwrap();
+
+        assert_eq!(function.name, "entry");
+        assert_eq!(function.address, 0x1092_14b6);
+        assert_eq!(function.signature, "undefined entry(void)");
+        assert_eq!(function.return_type, "undefined");
+        assert_eq!(function.parameters, vec!["int argc", "char ** argv"]);
+        assert!(function.pseudocode.contains("void entry(void)"));
+        assert!(!function.pseudocode.starts_with('\n'));
+        assert_eq!(
+            function.assembly,
+            "109214b6: PUSH EBP\n109214b7: MOV EBP,ESP"
+        );
+    }
+
+    #[test]
+    fn rejects_output_without_pseudocode() {
+        let error = parse_decompile_output("GAME_OPT_NAME\tentry\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no pseudocode section"), "error: {}", error);
+    }
+
+    #[test]
+    fn rejects_empty_pseudocode() {
+        let content = "\
+GAME_OPT_NAME\tentry
+GAME_OPT_ENTRY\t109214b6
+GAME_OPT_PSEUDO_BEGIN
+
+GAME_OPT_PSEUDO_END
+GAME_OPT_ASM_BEGIN
+GAME_OPT_ASM_END
+";
+        let error = parse_decompile_output(content).unwrap_err().to_string();
+        assert!(error.contains("empty pseudocode"), "error: {}", error);
+    }
+
+    #[test]
+    fn rejects_output_without_an_assembly_section() {
+        let content = "\
+GAME_OPT_NAME\tentry
+GAME_OPT_ENTRY\t109214b6
+GAME_OPT_PSEUDO_BEGIN
+void entry(void) {}
+GAME_OPT_PSEUDO_END
+";
+        let error = parse_decompile_output(content).unwrap_err().to_string();
+        assert!(error.contains("no assembly section"), "error: {}", error);
+    }
+
+    #[test]
+    fn rejects_an_empty_function_name() {
+        let content = "\
+GAME_OPT_NAME\t
+GAME_OPT_ENTRY\t109214b6
+GAME_OPT_PSEUDO_BEGIN
+void entry(void) {}
+GAME_OPT_PSEUDO_END
+GAME_OPT_ASM_BEGIN
+GAME_OPT_ASM_END
+";
+        let error = parse_decompile_output(content).unwrap_err().to_string();
+        assert!(error.contains("empty function name"), "error: {}", error);
+    }
+
+    #[test]
+    fn rejects_an_unterminated_pseudocode_section() {
+        let content = "\
+GAME_OPT_NAME\tentry
+GAME_OPT_ENTRY\t109214b6
+GAME_OPT_PSEUDO_BEGIN
+void entry(void) {}
+";
+        let error = parse_decompile_output(content).unwrap_err().to_string();
+        assert!(error.contains("end marker"), "error: {}", error);
+    }
+
+    #[test]
+    fn rejects_an_unterminated_assembly_section() {
+        let content = "\
+GAME_OPT_NAME\tentry
+GAME_OPT_ENTRY\t109214b6
+GAME_OPT_PSEUDO_BEGIN
+void entry(void) {}
+GAME_OPT_PSEUDO_END
+GAME_OPT_ASM_BEGIN
+109214b6\tPUSH EBP
+";
+        let error = parse_decompile_output(content).unwrap_err().to_string();
+        assert!(error.contains("assembly end marker"), "error: {}", error);
+    }
+
+    #[test]
+    fn parses_hex_addresses_with_and_without_prefix() {
+        assert_eq!(parse_hex_address("0x109214b6").unwrap(), 0x1092_14b6);
+        assert_eq!(parse_hex_address("109214B6").unwrap(), 0x1092_14b6);
+        assert_eq!(parse_hex_address(" 0X10 ").unwrap(), 0x10);
+    }
+
+    #[test]
+    fn rejects_invalid_addresses() {
+        assert!(parse_hex_address("").is_err());
+        assert!(parse_hex_address("0x").is_err());
+        assert!(parse_hex_address("hello").is_err());
+        assert!(parse_hex_address("0x1g").is_err());
+    }
+
+    #[test]
+    fn reads_ghidra_java_requirement() {
+        let dir = tempfile::tempdir().unwrap();
+        let ghidra = dir.path().join("Ghidra");
+        std::fs::create_dir_all(&ghidra).unwrap();
+        std::fs::write(
+            ghidra.join("application.properties"),
+            "application.name=Ghidra\napplication.java.min=25\n",
+        )
+        .unwrap();
+
+        assert_eq!(required_java_version(dir.path()).as_deref(), Some("25"));
+    }
+
+    #[test]
+    fn missing_ghidra_properties_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(required_java_version(dir.path()), None);
+    }
+
+    #[test]
+    fn reads_java_major_version_from_a_jdk_release_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("release"),
+            "IMPLEMENTOR=\"Eclipse Adoptium\"\nJAVA_VERSION=\"25.0.5\"\n",
+        )
+        .unwrap();
+        assert_eq!(java_major_version(dir.path()), Some(25));
+    }
+
+    #[test]
+    fn reads_legacy_java_version_format() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("release"), "JAVA_VERSION=\"1.8.0_402\"\n").unwrap();
+        assert_eq!(java_major_version(dir.path()), Some(8));
+    }
+
+    #[test]
+    fn missing_java_release_file_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(java_major_version(dir.path()), None);
+    }
+
+    #[test]
+    fn detects_a_ghidra_installation_by_its_launcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        std::fs::create_dir_all(&support).unwrap();
+        assert!(!is_ghidra_install(dir.path()));
+
+        std::fs::write(support.join("analyzeHeadless"), "#!/bin/sh\n").unwrap();
+        assert!(is_ghidra_install(dir.path()));
     }
 }

@@ -29,28 +29,62 @@ a Windows game you also need:
 For a native Linux game, Wine is not needed; launch the game through
 `mangohud` directly.
 
-## Optional, for features that are not implemented yet
+## Required for decompilation
+
+`decompile` runs Ghidra's headless analyzer and needs:
 
 | Tool | Needed for | Status on this machine |
 |------|------------|------------------------|
-| Ghidra 11.x+ | headless decompilation | **not installed** |
-| JDK 21 | running Ghidra | **not installed** |
+| Ghidra 12.2 | headless decompilation | installed under `/tmp/opencode/ghidra_extracted/ghidra_12.2_PUBLIC` |
+| Full JDK 25 | running Ghidra 12.2 | installed under `/tmp/opencode/jdk25-full` |
+
+Ghidra 12.2 requires Java **25**, not 21. A JRE is not enough; the JDK's
+`bin/javac` must exist. The tool does not install or download either one.
+
+```bash
+export JAVA_HOME=/tmp/opencode/jdk25-full
+export PATH="$JAVA_HOME/bin:$PATH"
+export GHIDRA_INSTALL_DIR=/tmp/opencode/ghidra_extracted/ghidra_12.2_PUBLIC
+```
+
+`GHIDRA_INSTALL_DIR` must point at the Ghidra root that contains
+`support/analyzeHeadless`, not at the `support` directory itself.
 
 `game-opt-tool doctor` reports all of the above. It exits non-zero only when a
 required safety/inspection check fails; missing Java/Ghidra are warnings.
+
+### Portable setup without root
+
+The current setup was installed under `/tmp/opencode` to avoid system packages.
+A JDK 25 archive can be fetched from Adoptium and extracted with:
+
+```bash
+mkdir -p /tmp/opencode/jdk25-full
+curl -L -o /tmp/opencode/jdk25.tar.gz \
+  'https://api.adoptium.net/v3/binary/latest/25/ga/linux/x64/jdk/hotspot/normal/eclipse'
+tar -xzf /tmp/opencode/jdk25.tar.gz \
+  -C /tmp/opencode/jdk25-full --strip-components=1
+test -x /tmp/opencode/jdk25-full/bin/javac
+```
+
+Download Ghidra 12.2 from <https://ghidra-sre.org/> (or its GitHub releases),
+unzip it, and set `GHIDRA_INSTALL_DIR` to the extracted
+`ghidra_12.2_PUBLIC` directory. Ghidra is Apache-2.0 licensed.
+
+`/tmp` is cleared on reboot. Keep the downloaded archives or move both
+directories to a persistent location such as `~/.local/opt`, then update
+`JAVA_HOME` and `GHIDRA_INSTALL_DIR`.
 
 ### Install on CachyOS / Arch
 
 ```bash
 sudo pacman -S --needed base-devel rustup wine mangohud
 rustup default stable
-
-# For future decompilation support:
-sudo pacman -S --needed jdk21-openjdk
-# Ghidra: install from the AUR (e.g. `yay -S ghidra`) or unzip a release
-# from https://ghidra-sre.org, then point the tool at it:
-export GHIDRA_INSTALL_DIR=/opt/ghidra
 ```
+
+Install Ghidra from the AUR or unzip a release. If your distribution's current
+`jdk-openjdk` is Java 25, that works; otherwise install a full JDK 25 package
+and point `JAVA_HOME` at it. Do not use `jre-openjdk`.
 
 ## Build
 
@@ -67,6 +101,10 @@ The binary is `target/release/game-opt-tool`.
 ```bash
 ./target/release/game-opt-tool doctor
 ./target/release/game-opt-tool doctor --game "/path/to/your/game"
+
+# With the decompilation environment exported:
+./target/release/game-opt-tool decompile \
+  --game "/path/to/your/game/DeusEx.exe"
 ```
 
 ## Low-friction workflow
@@ -101,6 +139,13 @@ cd /path/to/game-opt-tool
 ./target/release/game-opt-tool compare \
   --baseline /tmp/mangohud/before.csv \
   --patched /tmp/mangohud/after.csv
+
+# 7. Decompile one function (entry point by default).
+export JAVA_HOME=/tmp/opencode/jdk25-full
+export PATH="$JAVA_HOME/bin:$PATH"
+export GHIDRA_INSTALL_DIR=/tmp/opencode/ghidra_extracted/ghidra_12.2_PUBLIC
+./target/release/game-opt-tool decompile \
+  --game "/path/to/your/game/DeusEx.exe"
 ```
 
 Use the same save, settings, and route for both captures. The comparison
@@ -136,4 +181,9 @@ cannot leave a half-written executable.
 | `Backup checksum mismatch` | The `.bak` file was modified or corrupted. Restore refuses on purpose; use another backup or the original media. |
 | `Refusing to restore ... symbolic link` | Safety guard. Point the command at the real file, not a symlink. |
 | `directory is not writable` from `doctor` | Backups live next to the executable. Fix permissions or work on a copy. |
-| `java`/`ghidra` warnings in `doctor` | Expected: decompilation and real optimization are not implemented yet. |
+| `Ghidra not found` | Set `GHIDRA_INSTALL_DIR` to the directory containing `support/analyzeHeadless`. |
+| `GHIDRA_INSTALL_DIR ... does not contain support/analyzeHeadless` | The variable points one level too deep or at a random directory. Point it at the extracted `ghidra_12.2_PUBLIC` root. |
+| `Ghidra rejected the configured Java` | Ghidra 12.2 needs a full JDK 25. Check that `$JAVA_HOME/bin/javac` exists; a JRE or JDK 21 is rejected. |
+| `Ghidra produced no decompilation result` | The address has no function, or Ghidra failed. Read the printed tail of Ghidra's log. Try a known function address with `--address`. |
+| `Ghidra headless timed out` | Ghidra exceeded the 600-second limit. The binary may be unusually large or the JVM may be stuck; retry and check system memory. |
+| `java`/`ghidra` warnings in `doctor` | Decompilation is optional. Export `JAVA_HOME` and `GHIDRA_INSTALL_DIR` as shown above to enable it; all other commands still work. |
