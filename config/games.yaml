@@ -1,5 +1,9 @@
 # Game Optimization Config
-# Add your games here with their specific configurations
+# Add your games here with their specific configurations.
+#
+# NOTE: the `hot_functions` names below are planning examples, not verified
+# symbols. The decompiler only accepts numeric addresses (for example
+# `--address 0x109214b6`); it does not resolve function names yet.
 
 games:
   oblivion-remastered:

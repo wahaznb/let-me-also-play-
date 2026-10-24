@@ -97,6 +97,25 @@ enum Command {
         json: bool,
     },
 
+    /// Decompile a function with Ghidra
+    Decompile {
+        /// Path to the game executable
+        #[arg(short, long)]
+        game: std::path::PathBuf,
+
+        /// Function address in hex (defaults to the executable entry point)
+        #[arg(long)]
+        address: Option<String>,
+
+        /// Include the disassembly listing in text output
+        #[arg(long)]
+        assembly: bool,
+
+        /// Print machine-readable JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Optimize specific functions
     Optimize {
         /// Path to the game executable
@@ -219,6 +238,10 @@ async fn main() -> Result<()> {
                 frames as usize,
                 json,
             )?;
+        }
+        Some(Command::Decompile { game, address, assembly, json }) => {
+            info!("Decompiling game: {:?}", game);
+            decompile_game(&game, address.as_deref(), assembly, json).await?;
         }
         Some(Command::Optimize { game, functions, output }) => {
             info!("Optimizing game: {:?} (functions: {:?})", game, functions);
@@ -577,6 +600,68 @@ fn print_metric(label: &str, delta: &profiler::MetricDelta) {
     );
 }
 
+async fn decompile_game(
+    game_path: &Path,
+    address: Option<&str>,
+    show_assembly: bool,
+    json: bool,
+) -> Result<()> {
+    use decompiler::{parse_hex_address, Decompiler};
+    use game::GameInfo;
+
+    if !game_path.exists() {
+        bail!("Game path does not exist: {}", game_path.display());
+    }
+
+    let game = GameInfo::from_path(game_path)?;
+    let parsed_address = match address {
+        Some(value) => Some(parse_hex_address(value)?),
+        None => None,
+    };
+
+    let decompiler = Decompiler::new()?;
+    let function = match parsed_address {
+        Some(value) => decompiler.decompile_function(&game, value).await?,
+        None => decompiler.decompile_entry(&game).await?,
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&function)?);
+        return Ok(());
+    }
+
+    println!("Function: {}", function.name);
+    println!("Address:  0x{:X}", function.address);
+    println!("Signature: {}", function.signature);
+    println!("Returns:  {}", function.return_type);
+    if function.parameters.is_empty() {
+        println!("Parameters: none");
+    } else {
+        println!("Parameters:");
+        for parameter in &function.parameters {
+            println!("  - {}", parameter);
+        }
+    }
+
+    println!();
+    println!("{}", function.pseudocode);
+
+    if show_assembly {
+        println!();
+        println!("Disassembly:");
+        if function.assembly.is_empty() {
+            println!("  (none returned)");
+        } else {
+            println!("{}", function.assembly);
+        }
+    }
+
+    println!();
+    println!("Decompiled by Ghidra headless. Pseudocode is analysis output, not source.");
+
+    Ok(())
+}
+
 async fn optimize_game(
     game_path: &std::path::Path,
     functions: Option<&str>,
@@ -823,11 +908,10 @@ fn doctor_command(game: Option<&Path>) -> Result<()> {
     }
 
     println!();
-    println!("External tools (needed by future features):");
+    println!("External tools:");
     for (binary, purpose) in [
         ("wine", "running Windows builds"),
         ("mangohud", "frame-time capture"),
-        ("java", "Ghidra headless decompilation"),
     ] {
         match find_in_path(binary) {
             Some(found) => println!("[ok]   {}: {} ({})", binary, found.display(), purpose),
@@ -838,12 +922,94 @@ fn doctor_command(game: Option<&Path>) -> Result<()> {
         }
     }
 
-    match std::env::var_os("GHIDRA_INSTALL_DIR") {
-        Some(dir) if Path::new(&dir).is_dir() => {
-            println!("[ok]   ghidra: {}", Path::new(&dir).display());
+    let java_home = std::env::var_os("JAVA_HOME").map(PathBuf::from);
+    let ghidra_dir = std::env::var_os("GHIDRA_INSTALL_DIR").map(PathBuf::from);
+    let required_java = ghidra_dir
+        .as_ref()
+        .and_then(|dir| decompiler::required_java_version(dir))
+        .and_then(|version| version.parse::<u32>().ok());
+
+    let java_from_home = java_home
+        .as_ref()
+        .map(|home| home.join("bin").join("java"))
+        .filter(|path| path.is_file());
+    let java_bin = if let Some(home) = &java_home {
+        match java_from_home {
+            Some(path) => Some(path),
+            None => {
+                println!(
+                    "[warn] java: JAVA_HOME is set to {}, but it has no bin/java",
+                    home.display()
+                );
+                warnings += 1;
+                None
+            }
         }
-        _ => {
-            println!("[warn] ghidra: GHIDRA_INSTALL_DIR is not set to an existing directory");
+    } else {
+        find_in_path("java")
+    };
+
+    match java_bin {
+        Some(path) => {
+            println!(
+                "[ok]   java: {} (Ghidra headless decompilation)",
+                path.display()
+            );
+            let javac = java_home
+                .as_ref()
+                .map(|home| home.join("bin").join("javac"))
+                .filter(|path| path.is_file())
+                .or_else(|| find_in_path("javac"));
+            if javac.is_none() {
+                println!("[warn] javac: not found; Ghidra needs a full JDK, not a JRE");
+                warnings += 1;
+            }
+            if let (Some(home), Some(required)) = (&java_home, required_java) {
+                if let Some(actual) = decompiler::java_major_version(home) {
+                    if actual < required {
+                        println!(
+                            "[warn] java: {} is Java {}, but the installed Ghidra requires Java {}",
+                            home.display(),
+                            actual,
+                            required
+                        );
+                        warnings += 1;
+                    }
+                }
+            }
+        }
+        None => {
+            if java_home.is_none() {
+                println!(
+                    "[warn] java: not found on PATH (Ghidra headless decompilation)"
+                );
+                warnings += 1;
+            }
+        }
+    }
+
+    match ghidra_dir.as_ref() {
+        Some(dir) if decompiler::is_ghidra_install(dir) => {
+            match decompiler::required_java_version(dir) {
+                Some(version) => println!(
+                    "[ok]   ghidra: {} (requires Java {})",
+                    dir.display(),
+                    version
+                ),
+                None => println!("[ok]   ghidra: {}", dir.display()),
+            }
+        }
+        Some(dir) => {
+            println!(
+                "[warn] ghidra: {} is not a Ghidra installation (missing support/analyzeHeadless)",
+                dir.display()
+            );
+            warnings += 1;
+        }
+        None => {
+            println!(
+                "[warn] ghidra: GHIDRA_INSTALL_DIR is not set (Ghidra headless decompilation)"
+            );
             warnings += 1;
         }
     }

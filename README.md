@@ -1,9 +1,9 @@
 # Game Opt Tool
 
 > A work-in-progress tool for inspecting game binaries, measuring frame-time
-> consistency, and safely trying performance changes. The measurement and
-> backup/revert layers are real and tested; decompilation, optimization, and
-> binary rewriting are still prototypes.
+> consistency, and safely trying performance changes. The measurement,
+> backup/revert, and single-function Ghidra decompilation layers are real and
+> tested; optimization and binary rewriting are still prototypes.
 
 ## Current status (verified by `cargo test`)
 
@@ -18,14 +18,15 @@
 | A/B log comparison | **Working, tested** — deltas for average FPS, 1%/0.1% lows, p99, and stutter |
 | `analyze` | Detection plus real frame-time summary when a log is available; function hotspots are not implemented |
 | Verify | **Byte comparison only** — runtime equivalence is not implemented |
-| Decompilation | Skeleton; requires Ghidra + JDK |
+| Decompilation | **Working for one function at a time** — real Ghidra headless output; needs Ghidra 12.2 + JDK 25 |
 | Optimizer passes | **Stubs** — placeholder speedup values |
 | Binary patching | Writes a byte-identical copy; no code transformations yet |
 
 The tool does not fabricate frame-time measurements: when no log is available,
 `profile` fails with instructions and `analyze` explains how to generate one.
-Optimizer speedups are still labelled as placeholders, and `verify` never
-reports a changed binary as safe.
+Decompilation is real Ghidra output, not generated pseudocode. Optimizer
+speedups are still labelled as placeholders, and `verify` never reports a
+changed binary as safe.
 
 ## Safety model
 
@@ -52,6 +53,10 @@ Frame-time measurement additionally needs **MangoHud** and, for Windows games,
 ./target/release/game-opt-tool doctor --game "/path/to/DeusEx.exe"
 ```
 
+Decompilation additionally needs **Ghidra 12.2** and a full **JDK 25**. Ghidra
+12.2 rejects JDK 21 and JRE-only installations. See
+[PREREQUISITES.md](PREREQUISITES.md) for the current portable setup.
+
 ## Quick start
 
 ```bash
@@ -76,7 +81,42 @@ cp "/path/to/your/game/DeusEx.exe" /tmp/DeusEx.exe
 
 # Compare an original and a copy
 ./target/release/game-opt-tool verify --original /tmp/DeusEx.exe --patched /tmp/DeusEx-patched.exe
+
+# Decompile the executable's entry point with Ghidra
+./target/release/game-opt-tool decompile \
+  --game "/path/to/your/game/DeusEx.exe"
 ```
+
+## Decompile a function
+
+`decompile` runs Ghidra 12.2 in headless mode, imports the binary into a
+temporary project, and prints the pseudocode and function signature. With no
+`--address`, it uses the PE/ELF/Mach-O entry point:
+
+```bash
+export JAVA_HOME=/tmp/opencode/jdk25-full
+export GHIDRA_INSTALL_DIR=/tmp/opencode/ghidra_extracted/ghidra_12.2_PUBLIC
+
+./target/release/game-opt-tool decompile \
+  --game "/path/to/your/game/DeusEx.exe"
+
+# A specific function, with its x86 disassembly:
+./target/release/game-opt-tool decompile \
+  --game "/path/to/your/game/DeusEx.exe" \
+  --address 0x109214b6 --assembly
+
+# Machine-readable output for scripts:
+./target/release/game-opt-tool decompile \
+  --game "/path/to/your/game/DeusEx.exe" \
+  --address 0x109214b6 --json
+```
+
+The command fails if Ghidra cannot start or returns no result. It never falls
+back to placeholder pseudocode. Each invocation re-analyzes the binary, which
+takes roughly 20–30 seconds for Deus Ex; project caching is not implemented yet.
+Automatic hot-function discovery is also not implemented, so pass a real
+address from a profiler or debugger. A decompiled function is not yet fed into
+the optimizer automatically.
 
 ## Measure real frame times
 
@@ -156,6 +196,7 @@ the one used for optimization comparisons.
 | `analyze --game <path> [--log <csv>] [--log-dir <dir>]` | Detects format/architecture and prints measured frame-time statistics when a log is available |
 | `profile --game <path> [--log <csv>] [--log-dir <dir>] [--frames N] [--json]` | Computes real metrics from a MangoHud CSV; `--frames` analyzes only the last N frames |
 | `compare --baseline <csv> --patched <csv> [--frames N] [--json]` | Compares two measured runs and reports per-metric deltas with interpretation notes |
+| `decompile --game <path> [--address <hex>] [--assembly] [--json]` | Decompiles one function with Ghidra; defaults to the executable entry point |
 | `optimize --game <path> --output <dir>` | Runs stub passes and writes a copy (placeholder speedups, clearly labeled) |
 | `patch --game <path> --output <file>` | Creates a backup if needed and writes a byte-identical copy |
 | `verify --original <a> --patched <b>` | Compares bytes; changed files fail until runtime verification exists |
@@ -173,7 +214,7 @@ Global flags: `--help`, `--version`.
 
 | Game | Status |
 |------|--------|
-| **Deus Ex (2000)** | Test target: PE32/x86 detection and backup/revert verified against the real executable |
+| **Deus Ex (2000)** | Test target: PE32/x86 detection, backup/revert, and Ghidra decompilation of entry point `0x109214B6` verified against the real executable |
 | Oblivion Remastered, Skyrim SE, Jedi: Survivor | Config entries only; no target-specific work |
 
 There are no measured speedups for any game yet. The table in older docs was
@@ -193,13 +234,15 @@ MangoHud CSV → header discovery → frame times → avg / lows / percentiles /
                                               │
                                               ▼
                                      A/B compare (same scene)
+
+PE/ELF/Mach-O → entry point or --address → Ghidra headless → pseudocode + disassembly
 ```
 
-Planned pipeline (not implemented):
+Planned pipeline (not fully implemented):
 
 ```
-measure frame times → A/B compare runs → find hot functions → decompile →
-rewrite → patch → runtime A/B verification
+measure frame times → A/B compare runs → find hot functions (missing) →
+decompile one function (working) → rewrite → patch → runtime A/B verification
 ```
 
 ## Tests
@@ -208,18 +251,33 @@ rewrite → patch → runtime A/B verification
 ~/.cargo/bin/cargo test
 ```
 
-Current suite: **64 unit tests + 23 end-to-end CLI tests**, all passing. They
-cover SHA-256 NIST vectors, backup/restore round-trips, tampered and truncated
-backups, symlink refusal, permission preservation, PE/ELF/Mach-O magic
-detection, PE `MZ` detection, trampoline encoding and range checks, config
-parsing and name lookup, verifier truthfulness, MangoHud header/preamble and
-metric math, log discovery, A/B delta math and warnings, and the real CLI
-backup → corrupt → revert flow.
+Current suite: **79 unit tests + 25 end-to-end CLI tests**, all passing, plus one
+ignored real-Ghidra test. They cover SHA-256 NIST vectors, backup/restore
+round-trips, tampered and truncated backups, symlink refusal, permission
+preservation, PE/ELF/Mach-O magic detection, PE `MZ` detection, trampoline
+encoding and range checks, config parsing and name lookup, verifier
+truthfulness, MangoHud header/preamble and metric math, log discovery, A/B
+delta math and warnings, decompiler output parsing and address validation, and
+the real CLI backup → corrupt → revert flow.
+
+Run the real Ghidra test explicitly (it takes about 30 seconds):
+
+```bash
+export JAVA_HOME=/tmp/opencode/jdk25-full
+export GHIDRA_INSTALL_DIR=/tmp/opencode/ghidra_extracted/ghidra_12.2_PUBLIC
+export GAME_OPT_TEST_BINARY="/path/to/your/game/DeusEx.exe"
+~/.cargo/bin/cargo test --test cli_decompile \
+  decompiles_a_real_binary_entry_point -- --ignored
+```
 
 The real-world checks include:
 
 - Deus Ex executable (253,952 bytes) restored byte-for-byte
   (`sha256 3e6fdb89…bae00e`).
+- Ghidra 12.2 headless decompiled the real Deus Ex entry point
+  `0x109214B6` and returned the CRT `entry` pseudocode plus its x86
+  disassembly. It is startup code, not a performance hotspot; the point is that
+  the pipeline is real.
 - A genuine 143-frame MangoHud log produced by `glxgears`: the tool reported
   average FPS `48.01` versus MangoHud's own summary `48.0`, average frame time
   `20.83 ms` versus `20.8 ms`, and the same `0.1%` low of `42.45 FPS`.
