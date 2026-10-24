@@ -46,6 +46,148 @@ pub struct ProfileResults {
     pub stats: FrameTimeStats,
 }
 
+/// One metric compared between a baseline and a patched run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricDelta {
+    pub baseline: f64,
+    pub patched: f64,
+    pub absolute: f64,
+    pub percent: f64,
+    pub higher_is_better: bool,
+    pub improved: bool,
+}
+
+impl MetricDelta {
+    fn new(baseline: f64, patched: f64, higher_is_better: bool) -> Self {
+        let absolute = patched - baseline;
+        let percent = if baseline.abs() > f64::EPSILON {
+            absolute / baseline * 100.0
+        } else {
+            0.0
+        };
+        let improved = if higher_is_better {
+            absolute > 0.0
+        } else {
+            absolute < 0.0
+        };
+
+        Self {
+            baseline,
+            patched,
+            absolute,
+            percent,
+            higher_is_better,
+            improved,
+        }
+    }
+}
+
+/// Side-by-side comparison of two measured runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileComparison {
+    pub baseline: ProfileResults,
+    pub patched: ProfileResults,
+    pub avg_fps: MetricDelta,
+    pub low_1pct_fps: MetricDelta,
+    pub low_0_1pct_fps: MetricDelta,
+    pub p99_frame_time_ms: MetricDelta,
+    pub stutter_ratio: MetricDelta,
+    pub warnings: Vec<String>,
+}
+
+/// Compare two ProfileResults and attach interpretation warnings.
+pub fn compare_results(
+    baseline: ProfileResults,
+    patched: ProfileResults,
+    tail_frames: usize,
+) -> ProfileComparison {
+    let baseline_stats = &baseline.stats;
+    let patched_stats = &patched.stats;
+
+    ProfileComparison {
+        avg_fps: MetricDelta::new(
+            baseline_stats.avg_fps,
+            patched_stats.avg_fps,
+            true,
+        ),
+        low_1pct_fps: MetricDelta::new(
+            baseline_stats.low_1pct_fps,
+            patched_stats.low_1pct_fps,
+            true,
+        ),
+        low_0_1pct_fps: MetricDelta::new(
+            baseline_stats.low_0_1pct_fps,
+            patched_stats.low_0_1pct_fps,
+            true,
+        ),
+        p99_frame_time_ms: MetricDelta::new(
+            baseline_stats.p99_frame_time_ms,
+            patched_stats.p99_frame_time_ms,
+            false,
+        ),
+        stutter_ratio: MetricDelta::new(
+            baseline_stats.stutter_ratio,
+            patched_stats.stutter_ratio,
+            false,
+        ),
+        warnings: comparison_warnings(baseline_stats, patched_stats, tail_frames),
+        baseline,
+        patched,
+    }
+}
+
+fn comparison_warnings(
+    baseline: &FrameTimeStats,
+    patched: &FrameTimeStats,
+    tail_frames: usize,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    if baseline.frame_count < 100 || patched.frame_count < 100 {
+        warnings.push(format!(
+            "One or both runs have fewer than 100 frames ({} and {}); the 1% low is \
+             based on only a few slow frames.",
+            baseline.frame_count, patched.frame_count
+        ));
+    } else if baseline.frame_count < 1000 || patched.frame_count < 1000 {
+        warnings.push(format!(
+            "One or both runs have fewer than 1000 frames ({} and {}); the 0.1% low \
+             may be a single frame.",
+            baseline.frame_count, patched.frame_count
+        ));
+    }
+
+    let shorter = baseline.duration_seconds.min(patched.duration_seconds);
+    let longer = baseline.duration_seconds.max(patched.duration_seconds);
+    if shorter > 0.0 && longer / shorter > 1.25 {
+        warnings.push(format!(
+            "Run durations differ ({:.2}s vs {:.2}s); compare similar scenes or use \
+             --frames to trim both logs.",
+            baseline.duration_seconds, patched.duration_seconds
+        ));
+    }
+
+    if tail_frames > 0 {
+        warnings.push(format!(
+            "Both logs were trimmed to their last {} frames; the tails must cover \
+             the same scene for the comparison to be meaningful.",
+            tail_frames
+        ));
+    }
+
+    warnings.push(
+        "Comparison assumes both runs cover the same scene, settings, and workload."
+            .to_string(),
+    );
+    warnings.push(
+        "Single-run comparison: this is an observed difference in these two logs, \
+         not a statistical significance test."
+            .to_string(),
+    );
+
+    warnings
+}
+
 /// Profiler for measured frame-time logs.
 pub struct Profiler;
 
@@ -135,6 +277,41 @@ impl Profiler {
     pub fn export_json(&self, results: &ProfileResults) -> Result<String> {
         serde_json::to_string_pretty(results)
             .context("Failed to serialize profile results")
+    }
+
+    /// Compare two MangoHud logs.
+    pub fn compare_logs(
+        &self,
+        baseline: &Path,
+        patched: &Path,
+        tail_frames: usize,
+    ) -> Result<ProfileComparison> {
+        let baseline_path = std::fs::canonicalize(baseline)
+            .with_context(|| format!("Failed to resolve log {}", baseline.display()))?;
+        let patched_path = std::fs::canonicalize(patched)
+            .with_context(|| format!("Failed to resolve log {}", patched.display()))?;
+
+        if baseline_path == patched_path {
+            bail!(
+                "Baseline and patched logs resolve to the same file: {}",
+                baseline_path.display()
+            );
+        }
+
+        let baseline_results = self.profile_csv(baseline, tail_frames)?;
+        let patched_results = self.profile_csv(patched, tail_frames)?;
+
+        Ok(compare_results(
+            baseline_results,
+            patched_results,
+            tail_frames,
+        ))
+    }
+
+    /// Serialize a comparison as pretty JSON.
+    pub fn export_comparison_json(&self, comparison: &ProfileComparison) -> Result<String> {
+        serde_json::to_string_pretty(comparison)
+            .context("Failed to serialize comparison results")
     }
 }
 
@@ -414,6 +591,93 @@ mod tests {
 
     fn parse(content: &str) -> Result<Vec<f64>> {
         parse_mangohud_reader(Cursor::new(content.as_bytes()), 0)
+    }
+
+    fn results_from(frames: &[f64]) -> ProfileResults {
+        ProfileResults {
+            source: PathBuf::from("test.csv"),
+            stats: compute_stats(frames).unwrap(),
+        }
+    }
+
+    #[test]
+    fn comparison_reports_metric_deltas() {
+        // 10 ms/frame -> 8 ms/frame is a 25% FPS improvement.
+        let baseline = results_from(&[10.0, 10.0, 10.0, 20.0]);
+        let patched = results_from(&[8.0, 8.0, 8.0, 16.0]);
+
+        let comparison = compare_results(baseline, patched, 0);
+
+        assert!((comparison.avg_fps.percent - 25.0).abs() < 1e-9);
+        assert!(comparison.avg_fps.improved);
+        assert!((comparison.low_1pct_fps.percent - 25.0).abs() < 1e-9);
+        assert!(comparison.low_1pct_fps.improved);
+        assert!((comparison.p99_frame_time_ms.percent + 20.0).abs() < 1e-9);
+        assert!(comparison.p99_frame_time_ms.improved);
+        assert!(comparison.stutter_ratio.absolute.abs() < 1e-9);
+        assert!(
+            comparison
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("fewer than 100 frames"))
+        );
+    }
+
+    #[test]
+    fn comparison_marks_lower_frame_times_as_improved() {
+        let baseline = results_from(&[20.0, 20.0, 20.0, 20.0]);
+        let patched = results_from(&[10.0, 10.0, 10.0, 10.0]);
+
+        let comparison = compare_results(baseline, patched, 0);
+        assert!(comparison.p99_frame_time_ms.improved);
+        assert!(comparison.stutter_ratio.absolute.abs() < 1e-9);
+    }
+
+    #[test]
+    fn comparison_warns_about_duration_mismatch() {
+        let baseline = results_from(&[10.0; 100]); // 1 second
+        let patched = results_from(&[10.0; 200]); // 2 seconds
+
+        let comparison = compare_results(baseline, patched, 0);
+        assert!(
+            comparison
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("durations differ"))
+        );
+        assert!(
+            comparison
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("not a statistical significance test"))
+        );
+    }
+
+    #[test]
+    fn comparison_notes_tail_trimming() {
+        let baseline = results_from(&[10.0; 100]);
+        let patched = results_from(&[10.0; 100]);
+
+        let comparison = compare_results(baseline, patched, 50);
+        assert!(
+            comparison
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("trimmed to their last 50 frames"))
+        );
+    }
+
+    #[test]
+    fn compare_logs_rejects_the_same_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("MangoHud_same.csv");
+        std::fs::write(&path, "fps,frametime\n100,10\n100,10\n").unwrap();
+
+        let error = Profiler::new()
+            .compare_logs(&path, &path, 0)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("same file"), "error: {}", error);
     }
 
     #[test]

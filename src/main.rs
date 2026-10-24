@@ -78,6 +78,25 @@ enum Command {
         json: bool,
     },
 
+    /// Compare frame-time metrics from two MangoHud logs
+    Compare {
+        /// Baseline MangoHud CSV log
+        #[arg(long)]
+        baseline: std::path::PathBuf,
+
+        /// Patched/experimental MangoHud CSV log
+        #[arg(long)]
+        patched: std::path::PathBuf,
+
+        /// Compare only the last N frames of both logs (0 = all)
+        #[arg(short, long, default_value = "0")]
+        frames: u32,
+
+        /// Print machine-readable JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Optimize specific functions
     Optimize {
         /// Path to the game executable
@@ -188,6 +207,15 @@ async fn main() -> Result<()> {
                 &game,
                 log.as_deref(),
                 log_dir.as_deref(),
+                frames as usize,
+                json,
+            )?;
+        }
+        Some(Command::Compare { baseline, patched, frames, json }) => {
+            info!("Comparing logs: {:?} vs {:?}", baseline, patched);
+            compare_command(
+                &baseline,
+                &patched,
                 frames as usize,
                 json,
             )?;
@@ -479,6 +507,74 @@ fn print_profile(results: &profiler::ProfileResults) {
         stats.p95_frame_time_ms, stats.p99_frame_time_ms
     );
     println!("Stutter ratio (p99 / median): {:.2}x", stats.stutter_ratio);
+}
+
+fn compare_command(
+    baseline: &Path,
+    patched: &Path,
+    tail_frames: usize,
+    json: bool,
+) -> Result<()> {
+    use profiler::Profiler;
+
+    let profiler = Profiler::new();
+    let comparison = profiler.compare_logs(baseline, patched, tail_frames)?;
+
+    if json {
+        println!("{}", profiler.export_comparison_json(&comparison)?);
+    } else {
+        print_comparison(&comparison);
+    }
+
+    Ok(())
+}
+
+fn print_comparison(comparison: &profiler::ProfileComparison) {
+    let baseline = &comparison.baseline;
+    let patched = &comparison.patched;
+
+    println!(
+        "Baseline: {} ({} frames, {:.2}s)",
+        baseline.source.display(),
+        baseline.stats.frame_count,
+        baseline.stats.duration_seconds
+    );
+    println!(
+        "Patched:  {} ({} frames, {:.2}s)",
+        patched.source.display(),
+        patched.stats.frame_count,
+        patched.stats.duration_seconds
+    );
+    println!();
+    println!(
+        "{:<26} {:>10} {:>10} {:>10}  Verdict",
+        "Metric", "Baseline", "Patched", "Change"
+    );
+    print_metric("Average FPS", &comparison.avg_fps);
+    print_metric("1% low FPS", &comparison.low_1pct_fps);
+    print_metric("0.1% low FPS", &comparison.low_0_1pct_fps);
+    print_metric("p99 frame time (ms)", &comparison.p99_frame_time_ms);
+    print_metric("Stutter ratio (x)", &comparison.stutter_ratio);
+    println!();
+    println!("Interpretation notes:");
+    for warning in &comparison.warnings {
+        println!("  - {}", warning);
+    }
+}
+
+fn print_metric(label: &str, delta: &profiler::MetricDelta) {
+    let verdict = if delta.absolute == 0.0 {
+        "unchanged"
+    } else if delta.improved {
+        "better"
+    } else {
+        "worse"
+    };
+
+    println!(
+        "{:<26} {:>10.2} {:>10.2} {:>+9.2}%  {}",
+        label, delta.baseline, delta.patched, delta.percent, verdict
+    );
 }
 
 async fn optimize_game(

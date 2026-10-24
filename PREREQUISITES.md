@@ -2,14 +2,16 @@
 
 ## Required for the safety and inspection features
 
-`doctor`, `analyze`, `backup`, `revert`, and `verify` need:
+`doctor`, `analyze`, `backup`, `revert`, `verify`, `profile`, and `compare`
+need:
 
 - **Linux, macOS, or Windows.** Tested on CachyOS (Arch-based) x86_64.
 - **Rust 1.80 or newer** to build (`std::sync::LazyLock` requires 1.80).
   Built and tested with Rust 1.99.1.
-- **Write permission to the directory containing the game executable.**
-  Backups and their manifests are stored next to the original file, so
-  reverting never depends on a database or the current directory.
+- **Write permission to the directory containing the game executable for
+  `backup`/`revert`.** Backups and their manifests are stored next to the
+  original file, so reverting never depends on a database or the current
+  directory. `profile` and `compare` only read logs.
 - **No root, no network, and no Wine** for these commands.
 
 The tool never downloads anything at runtime and does not contain telemetry.
@@ -94,7 +96,16 @@ cd /path/to/game-opt-tool
 ./target/release/game-opt-tool profile \
   --game "/path/to/your/game/DeusEx.exe" \
   --log-dir /tmp/mangohud
+
+# 6. Compare a baseline and a patched run of the same scene.
+./target/release/game-opt-tool compare \
+  --baseline /tmp/mangohud/before.csv \
+  --patched /tmp/mangohud/after.csv
 ```
+
+Use the same save, settings, and route for both captures. The comparison
+warns about short runs, different durations, and tail trimming, but it cannot
+detect a scene mismatch for you.
 
 `log_duration=0` means "keep logging until the game exits". `autostart_log=1`
 starts capture without opening the MangoHud menu. Use the `mangohud` wrapper
@@ -118,6 +129,8 @@ cannot leave a half-written executable.
 | MangoHud overlay does not appear | The renderer may not be supported, or the game runs in a mode MangoHud cannot hook. Try `mangohud --dlsym <command>`; for Wine use `mangohud --dlsym wine <game.exe>`. |
 | `No MangoHud header found` | The file is not a MangoHud frame log (or is truncated). The tool skips MangoHud metadata rows but needs a `fps` or `frametime` header. |
 | 1% low differs from MangoHud's summary | By design: this tool averages the slowest 1% of frame times; MangoHud's summary reports a percentile. See the README metric definitions. |
+| `compare` warns that run durations differ | Capture both runs for the same length and scene, or use `--frames` to trim both tails to the same frame count. |
+| `compare` warns about fewer than 1000 frames | The lows are not statistically stable yet. Capture a longer, representative run. |
 | `invalid type: map, expected a sequence` | Old build. Fixed: `config/games.yaml` is parsed as a full config, then looked up by game name. |
 | `No backups found` | Run `backup --game <file>` first. Backups only exist for files backed up by this tool. |
 | `Backup checksum mismatch` | The `.bak` file was modified or corrupted. Restore refuses on purpose; use another backup or the original media. |
