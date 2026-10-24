@@ -48,6 +48,34 @@ jobs:
           name: game-opt-tool-linux
           path: target/release/game-opt-tool
 
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay-rust/toolchain@stable
+        with:
+          target: x86_64-apple-darwin
+      - run: cargo build --release --target x86_64-apple-darwin
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: game-opt-tool-macos
+          path: target/x86_64-apple-darwin/release/game-opt-tool
+
+  build-macos-apple-silicon:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay-rust/toolchain@stable
+        with:
+          target: aarch64-apple-darwin
+      - run: cargo build --release --target aarch64-apple-darwin
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: game-opt-tool-macos-arm64
+          path: target/aarch64-apple-darwin/release/game-opt-tool
+
   test-windows:
     runs-on: windows-latest
     steps:
@@ -63,3 +91,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay-rust/toolchain@stable
       - run: cargo test --all-targets
+
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay-rust/toolchain@stable
+        with:
+          target: x86_64-apple-darwin
+      - run: cargo test --all-targets --target x86_64-apple-darwin
