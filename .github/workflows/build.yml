@@ -20,6 +20,22 @@ jobs:
           name: game-opt-tool-windows
           path: target/x86_64-pc-windows-msvc/release/game-opt-tool.exe
 
+  build-windows-gnu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mingw-w64
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - uses: dtolnay-rust/toolchain@stable
+        with:
+          target: x86_64-pc-windows-gnu
+      - run: cargo build --release --target x86_64-pc-windows-gnu
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: game-opt-tool-windows-gnu
+          path: target/x86_64-pc-windows-gnu/release/game-opt-tool.exe
+
   build-linux:
     runs-on: ubuntu-latest
     steps:
@@ -40,3 +56,10 @@ jobs:
         with:
           target: x86_64-pc-windows-msvc
       - run: cargo test --all-targets --target x86_64-pc-windows-msvc
+
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay-rust/toolchain@stable
+      - run: cargo test --all-targets
