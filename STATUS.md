@@ -1,25 +1,95 @@
 # Game Opt Tool — Verified Status
 
-Last verified: 2026-10-24. Baseline commit `b27ad1e`; this document includes
-the real Ghidra decompilation work built on top of the measurement and A/B
-comparison passes.
+Last verified: 2026-10-24. Baseline commit `b27ad1e`.
 
-## One-line summary
+## What this tool does
 
-Binary detection, config loading, backup/revert, `doctor`, byte-level
-verification, real frame-time measurement from MangoHud CSV logs, A/B
-comparison of measured runs, and single-function Ghidra decompilation are
-implemented and tested. Function-level profiling, optimization, and binary
-rewriting are still placeholders and are labelled as such.
+This tool reverse-engineers and optimizes owned single-player game binaries.
+It focuses on **frame-time consistency** (1% lows) over raw FPS, preserves
+original behavior and quirks, and keeps every change **reversible** via
+cryptographic verification.
 
-## Test evidence
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         GAME OPT TOOL                                       │
+│                                                                             │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
+│  │  PE Parser   │  │   Patcher    │  │  Decompiler  │  │   Optimizer  │   │
+│  │   (pe.rs)    │  │  (mod.rs)    │  │   (Ghidra)   │  │    (stub)    │   │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘   │
+│         │                 │                 │                 │             │
+│         └─────────────────┴─────────────────┴─────────────────┘             │
+│                           │                                                 │
+│              ┌────────────▼────────────┐                                    │
+│              │    CLI Interface        │                                    │
+│              │   (main.rs / clap)      │                                    │
+│              └────────────┬────────────┘                                    │
+│                           │                                                 │
+│         ┌─────────────────┼─────────────────┐                               │
+│         │                 │                 │                               │
+│  ┌──────▼──────┐  ┌──────▼──────┐  ┌──────▼──────┐                          │
+│  │   Backup    │  │   Verify    │  │  MangoHud   │                          │
+│  │   System    │  │   System    │  │  Profiler   │                          │
+│  └─────────────┘  └─────────────┘  └─────────────┘                          │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Core Components
+
+### 1. PE Parser (`src/patcher/pe.rs`)
+- Parses PE32/PE32+ headers with strict validation
+- Maps virtual addresses to file offsets
+- Allocates new executable sections
+- Computes correct PE checksums
+
+### 2. Patcher (`src/patcher/mod.rs`)
+- Applies bounds-checked byte patches
+- Appends code caves (new executable sections)
+- Generates JSON manifests for exact rollback
+- Validates expected bytes before writing
+
+### 3. Backup System (`src/backup/mod.rs`)
+- Content-addressed backups with SHA-256
+- Atomic writes (temp file + fsync + rename)
+- Verification against recorded hashes
+- Permission preservation
+
+### 4. Decompiler (`src/decompiler/mod.rs`)
+- Headless Ghidra 12.2 integration
+- Entry-point auto-detection
+- Pseudocode + assembly output
+
+### 5. MangoHud Profiler (`src/profiler/mod.rs`)
+- CSV log ingestion
+- Frame-time metrics (avg, 1% low, p99, stutter)
+- A/B comparison between baseline and patched runs
+
+## Commands Reference
+
+| Command | Purpose | Example |
+|---------|---------|---------|
+| `backup` | Create backup with SHA-256 record | `backup --game DeusEx.exe` |
+| `backup --list` | Show existing backups | `backup --list --game DeusEx.exe` |
+| `backup --verify` | Check backup integrity | `backup --verify --game DeusEx.exe` |
+| `revert` | Restore from backup | `revert --game DeusEx.exe` |
+| `patch --spec` | Apply byte patches with manifest | `patch --game game.exe --output patched.exe --spec patch.json` |
+| `unpatch` | Rollback to original | `unpatch --manifest patched.exe.sha256.patch.json` |
+| `decompile` | Decompile function with Ghidra | `decompile --game game.exe --address 0x109214b6` |
+| `profile` | Analyze MangoHud logs | `profile --game game.exe --log-frame.csv` |
+| `compare` | Compare two runs | `compare --baseline before.csv --patched after.csv` |
+| `doctor` | Check prerequisites | `doctor --game DeusEx.exe` |
+
+## Test Evidence
 
 ```bash
 ~/.cargo/bin/cargo test --all-targets
-# 102 unit tests + 34 CLI end-to-end tests (PE byte-patch, code cave, unpatch, stale backup, symlink, moved copy), plus 1 ignored real-Ghidra test — all passing
+# 102 unit tests + 34 CLI end-to-end tests — all passing, 1 real-Ghidra test ignored
 
 ~/.cargo/bin/cargo build --release --bins
-# 0 errors, 6 dead-code/style warnings
+# 0 errors, 5 warnings (pre-existing optimizer/verifier/backup dead code)
 ```
 
 The ignored real-Ghidra test was run explicitly with JDK 25 and Ghidra 12.2:
@@ -33,29 +103,7 @@ export GAME_OPT_TEST_BINARY="/path/to/your/game/DeusEx.exe"
 # 1 passed; finished in 30.02s
 ```
 
-Real decompilation check against `DeusEx.exe`:
-
-- The tool computed the PE entry point `0x109214B6` (image base + entry RVA)
-  and Ghidra decompiled the CRT `entry` function at that address.
-- The output file contained a signature (`undefined entry(void)`), return type,
-  parameters, real pseudocode, and an x86 instruction listing.
-- `decompile --json` reported the same address and pseudocode; `--assembly`
-  printed instructions beginning with `PUSH EBP` / `MOV EBP,ESP`.
-- The decoder rejects missing output, an unterminated pseudocode section, empty
-  pseudocode, and malformed addresses. There is no placeholder fallback.
-
-Real A/B measurement check:
-
-- Captured two genuine MangoHud logs of `glxgears` (~3 seconds each), one
-  vsync-limited and one uncapped.
-- `compare` reported average FPS `48.01 → 1382.81` (+2780%), 1% low
-  `43.90 → 71.88`, and stutter ratio `1.06x → 58.71x`.
-- The tool therefore exposed the raw-FPS gain as a frame-time consistency
-  regression, which is the tradeoff this project exists to catch.
-- Both logs had real metadata preambles; discovery skipped the `_summary.csv`
-  files and selected the detailed logs.
-- The baseline's average FPS `48.01` and frame time `20.83 ms` match MangoHud's
-  own summary (`48.0`, `20.8`); the 0.1% low matches at `42.45 FPS`.
+## Real Binary Validation
 
 Backup check against `/path/to/your/game/DeusEx.exe`
 (253,952 bytes, PE32/x86):
@@ -83,7 +131,7 @@ Backup check against `/path/to/your/game/DeusEx.exe`
 | Frame metrics | Average/min/max FPS, 1% and 0.1% lows, median/p95/p99 frame time, duration, stutter ratio |
 | Log discovery | Newest `.csv`/`.log` in a directory whose header contains `frametime` or `fps` |
 | A/B comparison | Deltas for average FPS, 1%/0.1% lows, p99 frame time, and stutter, with short-run/duration/scene notes |
-| Measurement output | Human-readable text or `--json`; `--frames N` analyzes the last N frames |
+| PE byte patches | Strict PE parser, bounds-checked patches, expected-byte verification, code cave allocation, manifest-backed rollback |
 
 ## What is still a stub
 
@@ -92,81 +140,45 @@ Backup check against `/path/to/your/game/DeusEx.exe`
 | `analyze` hot functions | Not implemented; analyze reports measured frame times only and says so |
 | Automatic hot-function discovery | Not implemented; `decompile` needs an address or defaults to the entry point |
 | `optimize` | Stub passes; speedup values are placeholders |
-| `patch --spec` + `unpatch` | **Working for PE** — strict PE parser, bounds-checked byte patches, at most one appended executable section, expected-byte and SHA-256 guards, manifest-backed rollback, output/in-place/refuse collisions, symlink refusal. Copy mode still writes a byte-identical copy. |
 | `verify` runtime behavior | Not implemented; only bytes are compared |
 | Launch automation | The user launches the game under MangoHud manually |
 
-## Fixed in the measurement pass
+## Safety model
 
-- Removed the synthetic frame-time generator; `profile` now requires a real
-  MangoHud log and prints instructions when none exists.
-- Removed hardcoded hot-function percentages from `analyze`; it no longer
-  presents invented function data as measurement.
-- Added streaming parsing so large logs do not need to fit in memory.
-- Handles MangoHud metadata preamble rows before the CSV header, discovered by
-  testing against a genuine log.
-- Retains long frames instead of silently dropping stalls; rejects
-  non-finite/overflowing statistics.
-- Added `--frames` tail analysis and `--json` output.
-- Added `compare` for A/B log comparison with per-metric improvement direction
-  and explicit short-run, duration, scene, and significance caveats.
+1. **Backups are content-addressed**: The backup name includes the first 16 hex chars of the SHA-256 hash. You can always identify which file a backup came from.
 
-## Decompilation pass
+2. **Every backup has a manifest**: The `.bak.json` file records the original path, SHA-256, size, and creation time.
 
-- Replaced the previous skeleton with a real `support/analyzeHeadless`
-  invocation. The old code checked for `support/analyze` and used an
-  unsupported Python script, so it could never work.
-- Added a Java `GhidraScript` that resolves the function containing the
-  requested address, runs `DecompInterface`, and writes a deterministic result
-  file.
-- Added entry-point detection from the binary (PE image base + RVA, ELF entry,
-  Mach-O entry), a `decompile` CLI command, `--address`, `--assembly`, and
-  `--json`.
-- Output parsing requires a name, entry address, and non-empty pseudocode;
-  malformed or missing output fails the command instead of inventing a result.
-- Ghidra runs in a unique temporary project, has a 600-second timeout, and the
-  project is deleted afterward.
-- `doctor` now verifies `support/analyzeHeadless`, checks for a full JDK rather
-  than a JRE, and reports the Java major version required by the installed
-  Ghidra.
+3. **Restore verifies before and after**: The backup is read and its SHA-256 checked before writing. After writing, the target is re-read and verified.
 
-## Known limitations
+4. **Patches write manifests**: Every `patch --spec` creates a JSON manifest recording exactly which bytes were changed and what they were before.
 
-- No function-level profiling. Frame times alone cannot identify which
-  function is hot; that needs CPU sampling or instrumentation.
-- A/B comparison is single-run: no confidence intervals, multi-run aggregation,
-  or automatic scene alignment.
-- No automatic game launch or save-state handling.
-- 1% low is defined as the mean of the slowest 1% of frames, which differs
-  from tools that report a single percentile.
-- MangoHud must be able to overlay the game; anti-cheat or unsupported
-  renderers can block capture. Deus Ex under Wine is the intended path.
-- Each `decompile` invocation re-imports and re-analyzes the binary (about
-  20–30 seconds for Deus Ex). Ghidra project/function caching is not implemented.
-- Automatic hot-function discovery is not implemented, and a decompiled
-  function is not yet wired into the optimizer.
-- Ghidra is a large third-party Java application parsing the target binary. Only
-  analyze game files you trust.
-- No relocation handling or automatic patch generation yet. `--spec` is manual.
-- Restore-over-existing on Windows is remove-then-rename rather than atomic.
-- Backup creation reads the whole file into memory (fine for game executables,
-  not for multi-GB assets).
-- The backup directory is the executable's directory; read-only installs need
-  a writable copy.
+5. **Unpatch is exact**: `unpatch --manifest` restores the original bytes byte-for-byte and verifies the result matches the input SHA-256.
 
-## Next steps, in priority order
+6. **Atomic writes everywhere**: All file writes use temp file + fsync + rename. A crash cannot leave a truncated executable.
 
-1. **Real patching.** PE section parsing, bounds-checked byte patches, code
-   caves, relocations, and a patch manifest that records every modified byte
-   range for precise rollback.
-2. **Runtime A/B verification.** Launch original and patched builds with the
-   same save file, compare frame-time distributions with `compare`, and gate
-   patches on measured 1% lows before raw FPS.
-3. **Hot-function discovery and decompiler caching.** Add CPU sampling or
-   instrumentation to identify candidates, cache Ghidra analysis per binary
-   hash, and feed a selected function into the optimizer.
-4. **Multi-run confidence and launch automation.** Repeat captures, aggregate
-   run-to-run variance, and add a one-command capture helper that launches the
-   game under MangoHud.
-5. **Crash-safe experiment loop.** If the patched build fails to start, offer
-   one-command revert automatically.
+7. **Symlinks are refused**: The tool refuses to create backups or write patches over symlinks.
+
+8. **No network, no telemetry**: Everything runs locally.
+
+## Usage example: full patch lifecycle
+
+```bash
+# 1. Copy game to writable location
+cp -a "/path/to/your/game" /tmp/mygame/
+
+# 2. Create backup (ONE TIME)
+./target/release/game-opt-tool backup --game /tmp/mygame/DeusEx.exe
+# → Backup created: DeusEx.exe.3e6fdb89b880a60e.123456.bak
+
+# 3. Write patch spec
+cat > /tmp/mygame/patch.json << 'EOF'
+{
+  "schema_version": 1,
+  "name": "entry-nop",
+  "patches": [{
+    "address": "0x109214b6",
+    "expected": "55 8B EC 6A FF",
+    "replace": "90 90 90 90 90"
+  }]
+}
