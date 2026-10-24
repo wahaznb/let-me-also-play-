@@ -40,22 +40,42 @@ struct Cli {
 
 #[derive(clap::Subcommand, Debug)]
 enum Command {
-    /// Analyze a game for performance issues
+    /// Analyze a game and summarize measured frame times
     Analyze {
         /// Path to the game executable
         #[arg(short, long)]
         game: std::path::PathBuf,
+
+        /// MangoHud CSV log to analyze
+        #[arg(long)]
+        log: Option<std::path::PathBuf>,
+
+        /// Directory to search for the newest MangoHud CSV log
+        #[arg(long)]
+        log_dir: Option<std::path::PathBuf>,
     },
 
-    /// Find and profile hot functions
+    /// Measure frame-time consistency from a MangoHud CSV log
     Profile {
         /// Path to the game executable
         #[arg(short, long)]
         game: std::path::PathBuf,
 
-        /// Number of frames to profile
-        #[arg(short, long, default_value = "100")]
+        /// MangoHud CSV log to analyze (defaults to the newest log in --log-dir or the current directory)
+        #[arg(long)]
+        log: Option<std::path::PathBuf>,
+
+        /// Directory to search for the newest MangoHud CSV log
+        #[arg(long)]
+        log_dir: Option<std::path::PathBuf>,
+
+        /// Analyze only the last N frames (0 = all)
+        #[arg(short, long, default_value = "0")]
         frames: u32,
+
+        /// Print machine-readable JSON instead of text
+        #[arg(long)]
+        json: bool,
     },
 
     /// Optimize specific functions
@@ -158,19 +178,19 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::Analyze { game }) => {
+        Some(Command::Analyze { game, log, log_dir }) => {
             info!("Analyzing game: {:?}", game);
-            
-            // Check if this is Deus Ex
-            if is_deus_ex(&game) {
-                analyze_deus_ex(&game).await?;
-            } else {
-                analyze_game(&game).await?;
-            }
+            analyze_game(&game, log.as_deref(), log_dir.as_deref())?;
         }
-        Some(Command::Profile { game, frames }) => {
-            info!("Profiling game: {:?} for {} frames", game, frames);
-            profile_game(&game, frames).await?;
+        Some(Command::Profile { game, log, log_dir, frames, json }) => {
+            info!("Profiling game: {:?}", game);
+            profile_game(
+                &game,
+                log.as_deref(),
+                log_dir.as_deref(),
+                frames as usize,
+                json,
+            )?;
         }
         Some(Command::Optimize { game, functions, output }) => {
             info!("Optimizing game: {:?} (functions: {:?})", game, functions);
@@ -232,22 +252,6 @@ fn is_deus_ex(path: &Path) -> bool {
             .file_name()
             .map(|name| name.eq_ignore_ascii_case("deusex.exe"))
             .unwrap_or(false)
-}
-
-async fn analyze_deus_ex(game_path: &Path) -> Result<()> {
-    use profiler::Profiler;
-    
-    let profiler = Profiler::new();
-    let functions = profiler.find_hot_functions(game_path, 100).await?;
-    
-    println!("\nWARNING: hot-function percentages are synthetic placeholders;");
-    println!("         real measurement is not implemented yet.\n");
-    println!("Top hot functions:");
-    for (i, func) in functions.iter().enumerate() {
-        println!("  {}. {} — {:.2}% of frame time", i + 1, func.name, func.cpu_percent);
-    }
-    
-    Ok(())
 }
 
 async fn optimize_deus_ex(
@@ -352,47 +356,129 @@ fn show_help(game: &str) {
     }
 }
 
-async fn analyze_game(game_path: &std::path::Path) -> Result<()> {
+fn analyze_game(
+    game_path: &std::path::Path,
+    log: Option<&std::path::Path>,
+    log_dir: Option<&std::path::Path>,
+) -> Result<()> {
     use game::GameInfo;
     use profiler::Profiler;
 
-    // Load game info
     let game = GameInfo::from_path(game_path)?;
     println!("Detected game: {} {}", game.name, game.version);
     println!("Architecture: {}", game.architecture);
     println!("Binary format: {:?}", game.binary_format);
+    println!("Executable: {}", game.path.display());
 
-    // Profile to find hot functions
-    let profiler = Profiler::new();
-    let hot_functions = profiler.find_hot_functions(game_path, 100).await?;
+    if let Some(config) = &game.config {
+        println!(
+            "Config: {} ({} hot targets, {} quirks)",
+            config.name,
+            config.hot_functions.len(),
+            config.quirks.len()
+        );
+    }
 
-    println!("WARNING: hot-function percentages are synthetic placeholders; real measurement is not implemented yet.");
-    println!("\nTop hot functions:");
-    for (i, func) in hot_functions.iter().take(10).enumerate() {
-        println!("  {}. {} — {:.2}% of frame time", i + 1, func.name, func.cpu_percent);
+    let explicit_source = log.is_some() || log_dir.is_some();
+    match resolve_log_path(log, log_dir) {
+        Ok(log_path) => {
+            let profiler = Profiler::new();
+            let results = profiler.profile_csv(&log_path, 0)?;
+            println!();
+            print_profile(&results);
+            println!();
+            println!(
+                "NOTE: function-level hotspots require CPU instrumentation and are not \
+                 inferred from frame times."
+            );
+        }
+        Err(error) if explicit_source => return Err(error),
+        Err(_) => {
+            println!();
+            println!("No measurement log found.");
+            println!("Generate one by running the game through MangoHud:");
+            println!(
+                "  MANGOHUD_CONFIG=\"output_folder=/tmp/mangohud,autostart_log=1,log_duration=0\" \\"
+            );
+            println!("    mangohud --dlsym wine DeusEx.exe");
+            println!();
+            println!(
+                "Then: game-opt-tool analyze --game <exe> --log-dir /tmp/mangohud"
+            );
+        }
     }
 
     Ok(())
 }
 
-async fn profile_game(
+fn profile_game(
     game_path: &std::path::Path,
-    frames: u32,
+    log: Option<&std::path::Path>,
+    log_dir: Option<&std::path::Path>,
+    tail_frames: usize,
+    json: bool,
 ) -> Result<()> {
     use profiler::Profiler;
 
-    let profiler = Profiler::new();
-    let stats = profiler.profile(game_path, frames).await?;
+    if !game_path.exists() {
+        bail!("Game path does not exist: {}", game_path.display());
+    }
 
-    info!("WARNING: these numbers are synthetic placeholders; real frame-time capture is not implemented yet.");
-    println!("\nProfiling Results ({} frames):", frames);
-    println!("  Average FPS: {:.2}", stats.avg_fps);
-    println!("  Min FPS:     {:.2}", stats.min_fps);
-    println!("  Max FPS:     {:.2}", stats.max_fps);
-    println!("  Avg frame time: {:.2}ms", stats.avg_frame_time);
-    println!("  P99 frame time: {:.2}ms", stats.p99_frame_time);
+    let log_path = resolve_log_path(log, log_dir)?;
+    let profiler = Profiler::new();
+    let results = profiler.profile_csv(&log_path, tail_frames)?;
+
+    if json {
+        println!("{}", profiler.export_json(&results)?);
+    } else {
+        print_profile(&results);
+    }
 
     Ok(())
+}
+
+fn resolve_log_path(
+    log: Option<&std::path::Path>,
+    log_dir: Option<&std::path::Path>,
+) -> Result<PathBuf> {
+    use profiler::Profiler;
+
+    if let Some(path) = log {
+        if !path.is_file() {
+            bail!("Log file not found: {}", path.display());
+        }
+        return Ok(path.to_path_buf());
+    }
+
+    let directory = log_dir.unwrap_or_else(|| Path::new("."));
+    if !directory.is_dir() {
+        bail!("Log directory not found: {}", directory.display());
+    }
+
+    Profiler::find_latest_log(directory)
+}
+
+fn print_profile(results: &profiler::ProfileResults) {
+    let stats = &results.stats;
+
+    println!("Source: {}", results.source.display());
+    println!(
+        "Frames: {} ({:.2}s)",
+        stats.frame_count, stats.duration_seconds
+    );
+    println!("Average FPS: {:.2}", stats.avg_fps);
+    println!("Min / max FPS: {:.2} / {:.2}", stats.min_fps, stats.max_fps);
+    println!("1% low FPS: {:.2}", stats.low_1pct_fps);
+    println!("0.1% low FPS: {:.2}", stats.low_0_1pct_fps);
+    println!(
+        "Frame time avg / median: {:.2}ms / {:.2}ms",
+        stats.avg_frame_time_ms, stats.median_frame_time_ms
+    );
+    println!(
+        "Frame time p95 / p99: {:.2}ms / {:.2}ms",
+        stats.p95_frame_time_ms, stats.p99_frame_time_ms
+    );
+    println!("Stutter ratio (p99 / median): {:.2}x", stats.stutter_ratio);
 }
 
 async fn optimize_game(
