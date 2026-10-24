@@ -7,12 +7,16 @@
 **/vendor/
 
 # Build artifacts
+/target/
 /targets/*/target/
 /targets/*/out/
 **/*.exe
 **/*.dll
 **/*.so
 **/*.dylib
+
+# Local agent learning state (machine-specific)
+/.vibe-wise/
 
 # IDE
 .vscode/

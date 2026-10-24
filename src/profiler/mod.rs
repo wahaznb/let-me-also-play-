@@ -2,12 +2,11 @@
 //!
 //! Identifies hot functions and performance bottlenecks
 
-use crate::game::GameInfo;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Profiled function data
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,7 +28,7 @@ pub struct ProfileResults {
     pub avg_frame_time: f64,
     pub p99_frame_time: f64,
     pub functions: Vec<FunctionProfile>,
-    pub total_cpu_time_ms: f64,
+    pub total_cpu_time: f64,
 }
 
 /// Profiler for analyzing game performance
@@ -51,6 +50,10 @@ impl Profiler {
         game_path: &Path,
         frame_count: u32,
     ) -> Result<Vec<FunctionProfile>> {
+        if !game_path.exists() {
+            anyhow::bail!("Game path does not exist: {}", game_path.display());
+        }
+
         info!("Profiling game for {} frames...", frame_count);
 
         // This is a simplified implementation.
@@ -140,6 +143,17 @@ impl Profiler {
             functions,
             total_cpu_time,
         })
+    }
+
+    /// Generate a text report from profiled functions
+    pub fn generate_report(functions: &[FunctionProfile]) -> String {
+        let mut output = String::new();
+        output.push_str("\n=== Hot Functions ===\n");
+        for (i, func) in functions.iter().enumerate() {
+            output.push_str(&format!("{}. {} — {:.2}% of frame time\n", i + 1, func.name, func.cpu_percent));
+        }
+        output.push_str("\n");
+        output
     }
 
     /// Export profile data to JSON

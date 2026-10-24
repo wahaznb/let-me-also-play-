@@ -2,6 +2,7 @@
 name = "game-opt-tool"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.80"
 description = "Reverse engineer and optimize game binaries for better performance"
 license = "MIT"
 authors = ["Your Name Here"]
@@ -26,7 +27,6 @@ uuid = { version = "1.6", features = ["v4"] }
 # File system
 walkdir = "2.4"
 dirs = "5.0"
-uuid = "1.6"
 
 # Networking (for REA integration)
 reqwest = { version = "0.11", features = ["json"] }
@@ -55,9 +55,6 @@ memmap2 = "0.9"
 criterion = "0.5"
 tempfile = "3.9"
 
-[[bench]]
-name = "benchmark"
-harness = false
 
 [profile.release]
 opt-level = 3

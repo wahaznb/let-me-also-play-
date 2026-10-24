@@ -2,7 +2,6 @@
 //!
 //! Uses Ghidra's headless mode to decompile game binaries
 
-use crate::config::Config;
 use crate::game::GameInfo;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -208,9 +207,6 @@ else:
     ) -> Result<Vec<DecompiledFunction>> {
         info!("Finding hot functions in: {:?}", game_path);
 
-        // Load config to get known hot functions
-        let config = Config::load(Path::new("config/games.yaml"))?;
-
         let mut functions = Vec::new();
 
         // If specific functions are requested, decompile those
@@ -233,7 +229,7 @@ else:
         } else {
             // Use config to find known hot functions
             // This would be expanded based on the detected game
-            warn!("No specific functions requested and no game config found");
+            warn!("No specific functions requested; automatic hot-function discovery is not implemented");
         }
 
         Ok(functions)

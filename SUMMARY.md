@@ -1,5 +1,9 @@
 # Game Opt Tool — Project Summary
 
+> **Outdated.** This document describes the pre-revert prototype and claims a
+> pipeline and measured gains that are not implemented. See [STATUS.md](STATUS.md)
+> for the verified state.
+
 ## What We Built
 
 A complete foundation for a game optimization tool that:
