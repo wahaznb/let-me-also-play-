@@ -27,8 +27,11 @@ impl GameInfo {
         let exe_path = if path.is_file() {
             path.clone()
         } else {
-            // Look for common executable names
+            // Look for common executable names (including Deus Ex layouts)
             let candidates = vec![
+                path.join("System").join("DeusEx.exe"),
+                path.join("DeusEx.exe"),
+                path.join("Bin").join("DeusEx.exe"),
                 path.join("Game.exe"),
                 path.join("bin").join("Game.exe"),
                 path.join("Game").with_extension("exe"),
@@ -68,7 +71,7 @@ impl GameInfo {
 
         // Try ELF first (Linux)
         if let Ok(elf) = Elf::parse(&data) {
-            let arch = match elf.header.ptype {
+            let arch = match elf.header.e_type {
                 goblin::elf::header::ET_DYN | goblin::elf::header::ET_EXEC => {
                     match elf.header.e_machine {
                         goblin::elf::header::EM_X86_64 => (BinaryFormat::ELF, Architecture::X64),
@@ -85,16 +88,13 @@ impl GameInfo {
 
         // Try PE (Windows)
         if let Ok(pe) = PE::parse(&data) {
-            let arch = match pe.headers.native.headers.option.magic {
-                goblin::pe::constants::IMAGE_FILE_MACHINE_AMD64 => {
-                    (BinaryFormat::PE, Architecture::X64)
-                }
-                goblin::pe::constants::IMAGE_FILE_MACHINE_I386 => {
-                    (BinaryFormat::PE, Architecture::X86)
-                }
-                goblin::pe::constants::IMAGE_FILE_MACHINE_ARM64 => {
-                    (BinaryFormat::PE, Architecture::ARM64)
-                }
+            // COFF machine type from the PE headers
+            // In goblin 0.8, access via pe.headers.file_header.machine
+            let machine_type = pe.header.coff_header.machine;
+            let arch = match machine_type {
+                0x14c => (BinaryFormat::PE, Architecture::X86),   // IMAGE_FILE_MACHINE_I386
+                0x8664 => (BinaryFormat::PE, Architecture::X64),  // IMAGE_FILE_MACHINE_AMD64
+                0xAA64 => (BinaryFormat::PE, Architecture::ARM64), // IMAGE_FILE_MACHINE_ARM64
                 _ => (BinaryFormat::PE, Architecture::Unknown),
             };
             return Ok(arch);
@@ -125,23 +125,87 @@ impl GameInfo {
         Ok("UnknownGame".to_string())
     }
 
-    /// Load game-specific configuration
+    /// Load game-specific configuration.
+    ///
+    /// `config/games.yaml` is a full [`Config`] document (it has `games`,
+    /// `optimizations`, and `quirks` sections), so it must be parsed as such
+    /// and then looked up by name. Per-game files are `GameConfig` documents.
     fn load_config(game_name: &str) -> Result<Option<GameConfig>> {
-        let config_paths = vec![
-            PathBuf::from("config/games.yaml"),
-            PathBuf::from("config").join(format!("{}.yaml", game_name.to_lowercase())),
-        ];
+        let shared_path = PathBuf::from("config/games.yaml");
+        if shared_path.exists() {
+            let content = std::fs::read_to_string(&shared_path)
+                .with_context(|| format!("Failed to read {}", shared_path.display()))?;
+            let config: Config = serde_yaml::from_str(&content)
+                .with_context(|| format!("Failed to parse {}", shared_path.display()))?;
 
-        for path in config_paths {
-            if path.exists() {
-                let content = std::fs::read_to_string(&path)
-                    .with_context(|| format!("Failed to read {}", path.display()))?;
-                let config: GameConfig = serde_yaml::from_str(&content)
-                    .with_context(|| format!("Failed to parse {}", path.display()))?;
-                return Ok(Some(config));
+            if let Some(game) = config.find_game(game_name) {
+                return Ok(Some(game.clone()));
             }
         }
 
+        // Optional per-game override, e.g. config/deusex.yaml
+        let specific_path =
+            PathBuf::from("config").join(format!("{}.yaml", game_name.to_lowercase()));
+        if specific_path.exists() {
+            let content = std::fs::read_to_string(&specific_path)
+                .with_context(|| format!("Failed to read {}", specific_path.display()))?;
+            let config: GameConfig = serde_yaml::from_str(&content)
+                .with_context(|| format!("Failed to parse {}", specific_path.display()))?;
+            return Ok(Some(config));
+        }
+
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_current_executable_format() {
+        let path = std::env::current_exe().unwrap();
+        let (format, architecture) = GameInfo::detect_format(&path).unwrap();
+
+        #[cfg(target_os = "linux")]
+        assert_eq!(format, BinaryFormat::ELF);
+        #[cfg(target_os = "macos")]
+        assert_eq!(format, BinaryFormat::MachO);
+        #[cfg(target_os = "windows")]
+        assert_eq!(format, BinaryFormat::PE);
+
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        assert_eq!(architecture, Architecture::X64);
+        #[cfg(all(target_os = "linux", target_arch = "x86"))]
+        assert_eq!(architecture, Architecture::X86);
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        assert_eq!(architecture, Architecture::ARM64);
+    }
+
+    #[test]
+    fn unknown_bytes_are_reported_as_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not-a-binary.txt");
+        std::fs::write(&path, b"hello, this is not an executable").unwrap();
+
+        let (format, architecture) = GameInfo::detect_format(&path).unwrap();
+        assert_eq!(format, BinaryFormat::Unknown);
+        assert_eq!(architecture, Architecture::Unknown);
+    }
+
+    #[test]
+    fn shared_config_is_looked_up_by_name() {
+        // Unit tests run with the crate root as the working directory.
+        let config = GameInfo::load_config("Oblivion Remastered")
+            .expect("config parse must not fail");
+        let config = config.expect("Oblivion should be found in config/games.yaml");
+        assert_eq!(config.architecture, Architecture::X64);
+        assert_eq!(config.binary_format, BinaryFormat::PE);
+    }
+
+    #[test]
+    fn unknown_game_has_no_config() {
+        let config = GameInfo::load_config("No Such Game 12345").unwrap();
+        assert!(config.is_none());
     }
 }

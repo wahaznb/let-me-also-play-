@@ -4,11 +4,10 @@
 
 use crate::config::{Config, OptimizationPass};
 use crate::decompiler::DecompiledFunction;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use tracing::{info, warn};
+use std::path::Path;
+use tracing::info;
 
 /// Optimization status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -195,7 +194,7 @@ impl Optimizer {
     }
 
     /// Estimate speedup percentage
-    fn estimate_speedup(&self, original: &str, optimized: &str) -> f64 {
+    fn estimate_speedup(&self, _original: &str, optimized: &str) -> f64 {
         // In a real implementation, this would:
         // 1. Analyze the optimization passes applied
         // 2. Reference known speedups for similar patterns
