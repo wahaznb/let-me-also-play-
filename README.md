@@ -20,7 +20,7 @@
 | Verify | **Byte comparison only** — runtime equivalence is not implemented |
 | Decompilation | **Working for one function at a time** — real Ghidra headless output; needs Ghidra 12.2 + JDK 25 |
 | Optimizer passes | **Stubs** — placeholder speedup values |
-| Binary patching | Writes a byte-identical copy; no code transformations yet |
+| PE byte patches / code caves | **Working for PE** — `--spec` applies bounds-checked byte patches and optional appended executable sections; JSON manifest enables exact rollback via `unpatch`. Copy mode still writes a byte-identical copy. |
 
 The tool does not fabricate frame-time measurements: when no log is available,
 `profile` fails with instructions and `analyze` explains how to generate one.
@@ -34,10 +34,13 @@ changed binary as safe.
 - Every backup records the original SHA-256 in a JSON manifest.
 - Restores verify the backup *before* touching the target, then read the target
   back and verify it again.
+- Patches refuse to write their manifest over the input or output binary, and
+  refuse spec/output/manifest path aliases. They also refuse symlinks and
+  non-regular files.
 - Writes use a temp file + fsync + rename, so a crash cannot leave a truncated
   executable.
-- Symlinks are refused as backup/restore targets.
-- `--dry-run` previews a restore without writing.
+- Symlinks are refused as backup/restore and patch targets.
+- `--dry-run` previews a restore or patch without writing.
 - Backups live next to the original file; there is no hidden database.
 - No network access, no telemetry, no elevated privileges.
 
@@ -198,7 +201,7 @@ the one used for optimization comparisons.
 | `compare --baseline <csv> --patched <csv> [--frames N] [--json]` | Compares two measured runs and reports per-metric deltas with interpretation notes |
 | `decompile --game <path> [--address <hex>] [--assembly] [--json]` | Decompiles one function with Ghidra; defaults to the executable entry point |
 | `optimize --game <path> --output <dir>` | Runs stub passes and writes a copy (placeholder speedups, clearly labeled) |
-| `patch --game <path> --output <file>` | Creates a backup if needed and writes a byte-identical copy |
+| `patch --game <path> --output <file> [--spec <json>] [--manifest <json>] [--dry-run] [--json]` | Writes a byte-identical copy unless `--spec` is supplied; `--spec` applies bounds-checked byte patches and optional code caves, writes a manifest, and `unpatch` rolls back exactly |
 | `verify --original <a> --patched <b>` | Compares bytes; changed files fail until runtime verification exists |
 | `backup --game <file> [--list] [--verify]` | Creates, lists, or checks backups |
 | `revert --game <file> [--backup <manifest>] [--dry-run]` | Restores the newest or a specific verified backup |

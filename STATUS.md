@@ -16,7 +16,7 @@ rewriting are still placeholders and are labelled as such.
 
 ```bash
 ~/.cargo/bin/cargo test --all-targets
-# 79 unit tests + 25 end-to-end CLI tests — all passing, 1 real-Ghidra test ignored
+# 102 unit tests + 34 CLI end-to-end tests (PE byte-patch, code cave, unpatch, stale backup, symlink, moved copy), plus 1 ignored real-Ghidra test — all passing
 
 ~/.cargo/bin/cargo build --release --bins
 # 0 errors, 6 dead-code/style warnings
@@ -92,7 +92,7 @@ Backup check against `/path/to/your/game/DeusEx.exe`
 | `analyze` hot functions | Not implemented; analyze reports measured frame times only and says so |
 | Automatic hot-function discovery | Not implemented; `decompile` needs an address or defaults to the entry point |
 | `optimize` | Stub passes; speedup values are placeholders |
-| `patch` | Writes a byte-identical copy; refuses in-place writes without a backup |
+| `patch --spec` + `unpatch` | **Working for PE** — strict PE parser, bounds-checked byte patches, at most one appended executable section, expected-byte and SHA-256 guards, manifest-backed rollback, output/in-place/refuse collisions, symlink refusal. Copy mode still writes a byte-identical copy. |
 | `verify` runtime behavior | Not implemented; only bytes are compared |
 | Launch automation | The user launches the game under MangoHud manually |
 
@@ -147,7 +147,7 @@ Backup check against `/path/to/your/game/DeusEx.exe`
   function is not yet wired into the optimizer.
 - Ghidra is a large third-party Java application parsing the target binary. Only
   analyze game files you trust.
-- No real patch code generation, no code caves, no relocation handling.
+- No relocation handling or automatic patch generation yet. `--spec` is manual.
 - Restore-over-existing on Windows is remove-then-rename rather than atomic.
 - Backup creation reads the whole file into memory (fine for game executables,
   not for multi-GB assets).

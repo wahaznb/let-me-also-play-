@@ -140,6 +140,41 @@ enum Command {
         /// Output path for patched executable
         #[arg(short, long)]
         output: std::path::PathBuf,
+
+        /// JSON patch spec (byte patches and optional code cave)
+        #[arg(long)]
+        spec: Option<std::path::PathBuf>,
+
+        /// Write the patch manifest here instead of next to the output
+        #[arg(long)]
+        manifest: Option<std::path::PathBuf>,
+
+        /// Validate and report without writing the output or manifest
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Print machine-readable JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Revert exactly the changes recorded in a patch manifest
+    Unpatch {
+        /// Patch manifest written by `patch --spec`
+        #[arg(long)]
+        manifest: std::path::PathBuf,
+
+        /// Patched executable (defaults to the path recorded in the manifest)
+        #[arg(short, long)]
+        game: Option<std::path::PathBuf>,
+
+        /// Validate and report without writing anything
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Print machine-readable JSON instead of text
+        #[arg(long)]
+        json: bool,
     },
 
     /// Verify optimization correctness
@@ -252,14 +287,43 @@ async fn main() -> Result<()> {
                 optimize_game(&game, functions.as_deref()).await?;
             }
         }
-        Some(Command::Patch { game, output }) => {
+        Some(Command::Patch {
+            game,
+            output,
+            spec,
+            manifest,
+            dry_run,
+            json,
+        }) => {
             info!("Patching game: {:?} → {:?}", game, output);
-            
-            if is_deus_ex(&game) {
+
+            if let Some(spec_path) = spec {
+                patch_with_spec(
+                    &game,
+                    &output,
+                    &spec_path,
+                    manifest.as_deref(),
+                    dry_run,
+                    json,
+                )?;
+            } else if dry_run || json || manifest.is_some() {
+                bail!(
+                    "--dry-run, --json, and --manifest require --spec; without a spec, patch writes a byte-identical copy"
+                );
+            } else if is_deus_ex(&game) {
                 patch_deus_ex(&game, &output).await?;
             } else {
                 patch_game(&game, &output).await?;
             }
+        }
+        Some(Command::Unpatch {
+            manifest,
+            game,
+            dry_run,
+            json,
+        }) => {
+            info!("Reverting patch manifest: {:?}", manifest);
+            unpatch_command(&manifest, game.as_deref(), dry_run, json)?;
         }
         Some(Command::Verify { original, patched }) => {
             info!("Verifying: {:?} vs {:?}", original, patched);
@@ -351,12 +415,140 @@ async fn optimize_deus_ex(
 async fn patch_deus_ex(game_path: &Path, output: &Path) -> Result<()> {
     use patcher::Patcher;
 
-    println!("NOTE: binary patching is experimental; no code transformations are applied yet.");
+    println!(
+        "NOTE: no --spec supplied; writing a byte-identical copy. \
+         Pass --spec <json> to apply real byte patches or a code cave."
+    );
     backup_before_overwrite(output)?;
 
     let patcher = Patcher::new();
     patcher.apply_patches(game_path, output).await?;
-    
+
+    Ok(())
+}
+
+fn patch_with_spec(
+    game_path: &Path,
+    output_path: &Path,
+    spec_path: &Path,
+    manifest_path: Option<&Path>,
+    dry_run: bool,
+    json: bool,
+) -> Result<()> {
+    use patcher::{PatchSpec, Patcher};
+
+    if !game_path.exists() {
+        bail!("Game path does not exist: {}", game_path.display());
+    }
+    let spec = PatchSpec::load(spec_path)?;
+
+    // Refuse path aliases before creating a backup or writing anything.
+    if patcher::same_file(output_path, spec_path) {
+        bail!(
+            "Refusing to write the patched binary over the patch spec: {}",
+            spec_path.display()
+        );
+    }
+    if let Some(manifest_path) = manifest_path {
+        if patcher::same_file(manifest_path, spec_path) {
+            bail!(
+                "Refusing to write the patch manifest over the patch spec: {}",
+                spec_path.display()
+            );
+        }
+        if patcher::same_file(manifest_path, game_path) {
+            bail!(
+                "Refusing to write the patch manifest over the input binary: {}",
+                game_path.display()
+            );
+        }
+        if patcher::same_file(manifest_path, output_path) {
+            bail!(
+                "Refusing to write the patch manifest over the output binary: {}",
+                output_path.display()
+            );
+        }
+    }
+    if !dry_run {
+        backup_before_overwrite(output_path)?;
+    }
+
+    let patcher = Patcher::new();
+    let report = patcher.apply_spec(
+        game_path,
+        output_path,
+        &spec,
+        manifest_path,
+        dry_run,
+    )?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    let action = if dry_run { "Would apply" } else { "Applied" };
+    println!(
+        "{action} {} byte patch(es) and {} code section(s).",
+        report.patches_applied, report.sections_added
+    );
+    println!("  input:    {}", report.input_path.display());
+    println!("  output:   {}", report.output_path.display());
+    println!("  input SHA-256:  {}", report.input_sha256);
+    println!("  output SHA-256: {}", report.output_sha256);
+    println!(
+        "  checksum: 0x{:08X} -> 0x{:08X}",
+        report.checksum_before, report.checksum_after
+    );
+    if report.manifest_written {
+        println!("  manifest: {}", report.manifest_path.display());
+        println!(
+            "  revert with: game-opt-tool unpatch --manifest {}",
+            report.manifest_path.display()
+        );
+    } else {
+        println!("  manifest: not written (dry run)");
+    }
+    for section in &report.sections {
+        println!(
+            "  cave {:?}: VA 0x{:X}, {} bytes, executable",
+            section.name, section.address, section.virtual_size
+        );
+    }
+    for patch in &report.patches {
+        println!(
+            "  patch 0x{:X} ({}): {} -> {}",
+            patch.address, patch.section, patch.before_hex, patch.after_hex
+        );
+    }
+    Ok(())
+}
+
+fn unpatch_command(
+    manifest_path: &Path,
+    game_path: Option<&Path>,
+    dry_run: bool,
+    json: bool,
+) -> Result<()> {
+    use patcher::Patcher;
+
+    let report = Patcher::unpatch(manifest_path, game_path, dry_run)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    let action = if dry_run { "Would revert" } else { "Reverted" };
+    println!(
+        "{action} {} byte patch(es) and {} code section(s).",
+        report.patches_reverted, report.sections_removed
+    );
+    println!("  target:  {}", report.target.display());
+    println!("  before SHA-256: {}", report.output_sha256);
+    println!("  after SHA-256:  {}", report.restored_sha256);
+    if dry_run {
+        println!("  no files written (dry run)");
+    }
     Ok(())
 }
 
@@ -708,7 +900,10 @@ async fn patch_game(
 ) -> Result<()> {
     use patcher::Patcher;
 
-    println!("NOTE: binary patching is experimental; no code transformations are applied yet.");
+    println!(
+        "NOTE: no --spec supplied; writing a byte-identical copy. \
+         Pass --spec <json> to apply real byte patches or a code cave."
+    );
     backup_before_overwrite(output_path)?;
 
     let patcher = Patcher::new();
@@ -762,7 +957,8 @@ fn backup_before_overwrite(path: &Path) -> Result<()> {
     }
 
     let record = backup::create(path)?;
-    println!(
+    // This is a diagnostic; keep stdout clean for --json commands.
+    eprintln!(
         "Backup created before overwrite: {}",
         record.backup_path.display()
     );
