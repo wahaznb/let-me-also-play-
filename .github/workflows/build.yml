@@ -1,0 +1,42 @@
+name: Build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay-rust/toolchain@stable
+        with:
+          target: x86_64-pc-windows-msvc
+      - run: cargo build --release --target x86_64-pc-windows-msvc
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: game-opt-tool-windows
+          path: target/x86_64-pc-windows-msvc/release/game-opt-tool.exe
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay-rust/toolchain@stable
+      - run: cargo build --release
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: game-opt-tool-linux
+          path: target/release/game-opt-tool
+
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay-rust/toolchain@stable
+        with:
+          target: x86_64-pc-windows-msvc
+      - run: cargo test --all-targets --target x86_64-pc-windows-msvc
