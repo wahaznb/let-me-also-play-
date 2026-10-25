@@ -109,7 +109,7 @@ and the cached Ghidra function map turns them into per-function self CPU time.
 
 ```bash
 ~/.cargo/bin/cargo test --all-targets
-# 193 passed, 0 failed, 1 ignored (real-Ghidra test)
+# 194 passed, 0 failed, 1 ignored (real-Ghidra test)
 
 ~/.cargo/bin/cargo build --release --bins
 # 0 errors, 5 warnings (pre-existing optimizer/verifier/backup dead code)

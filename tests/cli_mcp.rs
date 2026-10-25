@@ -383,6 +383,35 @@ fn stdio_sample_rejects_a_missing_game_without_starting_a_probe() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn stdio_sample_explains_that_the_game_is_not_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = dir.path().join("sample-not-running.exe");
+    std::fs::write(&game, pe32()).unwrap();
+
+    let responses = stdio_session(&[json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "sample",
+            "arguments": {
+                "game": game.to_str().unwrap(),
+                "duration_secs": 1,
+                "resolve_functions": false
+            }
+        }
+    })]);
+
+    assert!(is_error(&responses[&1]));
+    let text = tool_text(&responses[&1]);
+    assert!(
+        text.contains("No running process maps"),
+        "sample should explain how to fix a missing process: {text}"
+    );
+}
+
 #[test]
 fn stdio_sample_schema_requires_a_game_and_bounds_the_window() {
     let responses = stdio_session(&[
