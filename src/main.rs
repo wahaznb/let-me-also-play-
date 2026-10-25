@@ -14,6 +14,7 @@ mod patcher;
 mod verifier;
 mod backup;
 mod hash;
+mod mcp;
 pub mod targets;
 
 use anyhow::{bail, Context, Result};
@@ -233,6 +234,21 @@ enum Command {
         /// Game name
         game: String,
     },
+
+    /// Start the MCP server so AI agents (OpenCode, Claude Code, ...) can call the tool
+    McpServer {
+        /// Transport: stdio for local agents, http for remote/HTTP clients
+        #[arg(long, default_value = "stdio", value_parser = ["stdio", "http"])]
+        transport: String,
+
+        /// Host to bind when --transport http
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// Port to bind when --transport http
+        #[arg(long, default_value = "9000")]
+        port: u16,
+    },
 }
 
 #[tokio::main]
@@ -348,6 +364,17 @@ async fn main() -> Result<()> {
         }
         Some(Command::Help { game }) => {
             show_help(&game);
+        }
+        Some(Command::McpServer {
+            transport,
+            host,
+            port,
+        }) => {
+            match transport.as_str() {
+                "stdio" => mcp::run_stdio().await?,
+                "http" => mcp::run_http(&host, port).await?,
+                other => bail!("Unsupported MCP transport: {other}"),
+            }
         }
         None => {
             Cli::command().print_help()?;
