@@ -5,6 +5,7 @@
 //!
 //! * `decompile`   → Ghidra headless via [`crate::decompiler`]
 //! * `game_info`   → binary/game detection + entry point
+//! * `sample`      → real per-function CPU samples from a running game
 //! * `profile`     → MangoHud CSV frame-time stats
 //! * `compare`     → baseline vs patched frame-time comparison
 //! * `patch`       → validated, manifest-backed PE patch
@@ -239,7 +240,7 @@ async fn handle_message(request: &Value) -> Option<Value> {
                         "name": SERVER_NAME,
                         "version": env!("CARGO_PKG_VERSION"),
                     },
-                    "instructions": "Reverse-engineering and binary-patching tools for owned, single-player games. Start with game_info, then decompile, profile, and patch."
+                    "instructions": "Reverse-engineering and binary-patching tools for owned, single-player games. Start with game_info, use sample for real per-function CPU hotspots while the game runs, decompile one function at a time, then patch and compare."
                 }),
             )
         }
@@ -325,6 +326,24 @@ fn tool_definitions() -> Value {
                     "filter": { "type": "string", "description": "Case-insensitive substring match on the function name." },
                     "offset": { "type": "integer", "minimum": 0, "description": "Skip this many matching functions." },
                     "limit": { "type": "integer", "minimum": 1, "description": "Maximum functions to return (default 200, max 1000)." }
+                },
+                "required": ["game"]
+            })
+        ),
+        tool(
+            "sample",
+            "Sample a running game's CPU time per function with Linux perf_event_open, without sudo. Launch the game first; this finds the process that maps `game` unless pid/process is given. Resolves function names with cached Ghidra analysis. Returns self CPU samples, not GPU time or call-graph attribution.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "game": { "type": "string", "description": "Path to the game executable. Also used to find the running process and resolve function names." },
+                    "pid": { "type": "integer", "minimum": 1, "description": "Running game PID. Optional; omit to find the process mapping the game." },
+                    "process": { "type": "string", "description": "Process name substring (e.g. DeusEx.exe) instead of pid." },
+                    "duration_secs": { "type": "integer", "minimum": 1, "maximum": 120, "description": "Sampling window in seconds (default 10)." },
+                    "frequency": { "type": "integer", "minimum": 1, "maximum": 999, "description": "Samples per second per thread (default 99)." },
+                    "top": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Functions to return (default 20)." },
+                    "refresh_functions": { "type": "boolean", "description": "Rebuild the cached Ghidra function list." },
+                    "resolve_functions": { "type": "boolean", "description": "Resolve names with Ghidra (default true). False returns raw PE RVAs and skips Ghidra." }
                 },
                 "required": ["game"]
             })
@@ -431,6 +450,7 @@ async fn call_tool(params: &Value) -> Result<(String, bool)> {
         "game_info" => tool_game_info(&args),
         "decompile" => tool_decompile(&args).await,
         "list_functions" => tool_list_functions(&args).await,
+        "sample" => tool_sample(&args).await,
         "profile" => tool_profile(&args),
         "compare" => tool_compare(&args),
         "patch" => tool_patch(&args),
@@ -602,6 +622,61 @@ async fn tool_list_functions(args: &Value) -> Result<Value> {
     }))
 }
 
+async fn tool_sample(args: &Value) -> Result<Value> {
+    use crate::sampler::{run, SampleConfig};
+
+    let game = PathBuf::from(arg_str(args, "game")?);
+    if !game.is_file() {
+        anyhow::bail!("Game executable not found: {}", game.display());
+    }
+
+    let pid = match args.get("pid").and_then(Value::as_u64) {
+        Some(value) => Some(
+            u32::try_from(value)
+                .map_err(|_| anyhow::anyhow!("pid is outside the valid range"))?,
+        ),
+        None => None,
+    };
+    let process = opt_str(args, "process");
+    if pid.is_some() && process.is_some() {
+        anyhow::bail!("Pass either pid or process, not both");
+    }
+
+    let duration_secs = args
+        .get("duration_secs")
+        .and_then(Value::as_u64)
+        .unwrap_or(10)
+        .clamp(1, 120);
+    let frequency = args
+        .get("frequency")
+        .and_then(Value::as_u64)
+        .unwrap_or(99)
+        .clamp(1, 999) as u32;
+    let top = args
+        .get("top")
+        .and_then(Value::as_u64)
+        .unwrap_or(20)
+        .clamp(1, 100) as usize;
+    let resolve_functions = args
+        .get("resolve_functions")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    let report = run(SampleConfig {
+        game,
+        pid,
+        process,
+        duration: std::time::Duration::from_secs(duration_secs),
+        frequency,
+        top,
+        refresh_functions: opt_bool(args, "refresh_functions"),
+        resolve_functions,
+    })
+    .await?;
+
+    Ok(serde_json::to_value(report)?)
+}
+
 fn tool_profile(args: &Value) -> Result<Value> {
     let log = PathBuf::from(arg_str(args, "log")?);
     if !log.is_file() {
@@ -732,6 +807,7 @@ mod tests {
             "game_info",
             "decompile",
             "list_functions",
+            "sample",
             "profile",
             "compare",
             "patch",

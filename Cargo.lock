@@ -587,6 +587,7 @@ dependencies = [
  "criterion",
  "dirs",
  "goblin",
+ "libc",
  "memmap2",
  "object",
  "reqwest",

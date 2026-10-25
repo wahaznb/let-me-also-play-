@@ -14,7 +14,7 @@
 //! non-executable patch targets, overlapping patches, header overflow, and
 //! section-count overflow.
 
-mod pe;
+pub(crate) mod pe;
 #[cfg(test)]
 mod test_support;
 

@@ -212,7 +212,7 @@ fn analyze_summarizes_a_real_log() {
     assert!(text.contains("Detected game:"), "output: {}", text);
     assert!(text.contains("1% low FPS: 50.00"), "output: {}", text);
     assert!(
-        text.contains("function-level hotspots require CPU instrumentation"),
+        text.contains("run `game-opt-tool sample --game <exe>`"),
         "output: {}",
         text
     );
