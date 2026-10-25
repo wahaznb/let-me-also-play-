@@ -400,7 +400,7 @@ keep only if the tail improves and behavior is unchanged
 ~/.cargo/bin/cargo test
 ```
 
-Current suite: **193 tests passing, 1 ignored** (142 unit + 51 end-to-end
+Current suite: **194 tests passing, 1 ignored** (142 unit + 52 end-to-end
 CLI/MCP tests, plus one ignored real-Ghidra test). They cover SHA-256 NIST
 vectors, backup/restore round-trips, tampered and truncated backups, symlink
 refusal, permission preservation, PE/ELF/Mach-O magic detection, PE `MZ`
