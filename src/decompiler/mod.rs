@@ -111,6 +111,53 @@ public class GameOptDecompile extends GhidraScript {
 }
 "#;
 
+/// Ghidra script that lists every function as address, name, and size.
+const LIST_FUNCTIONS_SCRIPT: &str = r#"
+import ghidra.app.script.GhidraScript;
+import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.FunctionIterator;
+import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
+
+public class GameOptListFunctions extends GhidraScript {
+    @Override
+    public void run() throws Exception {
+        String[] args = getScriptArgs();
+        if (args.length < 1) {
+            throw new IllegalArgumentException("usage: <output-file>");
+        }
+
+        FunctionIterator functions =
+            currentProgram.getFunctionManager().getFunctions(true);
+
+        try (PrintWriter out = new PrintWriter(args[0], StandardCharsets.UTF_8)) {
+            while (functions.hasNext()) {
+                Function function = functions.next();
+                long size = function.getBody().getNumAddresses();
+                out.println(function.getEntryPoint()
+                    + "\t" + clean(function.getName())
+                    + "\t" + size);
+            }
+        }
+    }
+
+    private String clean(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.replace('\t', ' ').replace('\r', ' ').replace('\n', ' ');
+    }
+}
+"#;
+
+/// One function handle from [`Decompiler::list_functions`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FunctionSummary {
+    pub address: u64,
+    pub name: String,
+    pub size: u64,
+}
+
 /// One decompiled function.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecompiledFunction {
@@ -409,6 +456,126 @@ impl Decompiler {
 
         Ok(functions)
     }
+    /// List every function as a cheap `(address, name, size)` handle.
+    ///
+    /// This runs one Ghidra import and writes no pseudocode. Agents should use
+    /// it to choose which functions to decompile, one at a time.
+    pub async fn list_functions(&self, game: &GameInfo) -> Result<Vec<FunctionSummary>> {
+        info!("Listing functions in {}", game.path.display());
+
+        let workspace =
+            std::env::temp_dir().join(format!("game-opt-ghidra-list-{}", uuid::Uuid::new_v4()));
+        let project_dir = workspace.join("project");
+        let script_dir = workspace.join("scripts");
+        let output_path = workspace.join("functions.txt");
+        std::fs::create_dir(&workspace).with_context(|| {
+            format!("Failed to create Ghidra workspace {}", workspace.display())
+        })?;
+
+        let setup = (|| -> Result<()> {
+            std::fs::create_dir(&project_dir).with_context(|| {
+                format!(
+                    "Failed to create Ghidra project directory {}",
+                    project_dir.display()
+                )
+            })?;
+            std::fs::create_dir(&script_dir)?;
+            std::fs::write(script_dir.join("GameOptListFunctions.java"), LIST_FUNCTIONS_SCRIPT)
+                .context("Failed to write the Ghidra function-list script")?;
+            Ok(())
+        })();
+        if let Err(error) = setup {
+            let _ = std::fs::remove_dir_all(&workspace);
+            return Err(error);
+        }
+
+        let mut command = self.headless_command();
+        command
+            .arg(&project_dir)
+            .arg(GHIDRA_PROJECT_NAME)
+            .arg("-import")
+            .arg(&game.path)
+            .arg("-overwrite")
+            .arg("-scriptPath")
+            .arg(&script_dir)
+            .arg("-postScript")
+            .arg("GameOptListFunctions.java")
+            .arg(&output_path)
+            .arg("-deleteProject")
+            .current_dir(&workspace)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+
+        if let Some(java_home) = &self.java_home {
+            command.env("JAVA_HOME", java_home);
+            prepend_path(&mut command, &java_home.join("bin"));
+        }
+
+        let run = tokio::time::timeout(GHIDRA_TIMEOUT, command.output()).await;
+        let result = match run {
+            Ok(Ok(output)) => {
+                if let Ok(content) = std::fs::read_to_string(&output_path) {
+                    parse_function_list(&content)
+                } else {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let hint = self.start_hint(&stdout, &stderr);
+                    Err(anyhow::anyhow!(
+                        "Ghidra produced no function list.{}\n{}",
+                        hint,
+                        tail(&stdout, &stderr)
+                    ))
+                }
+            }
+            Ok(Err(error)) => Err(error).context("Failed to run Ghidra headless analyzer"),
+            Err(_) => Err(anyhow::anyhow!(
+                "Ghidra headless timed out after {} seconds",
+                GHIDRA_TIMEOUT.as_secs()
+            )),
+        };
+
+        let _ = std::fs::remove_dir_all(&workspace);
+        result
+    }
+}
+
+/// Parse `address\tname\tsize` lines produced by the Ghidra list script.
+fn parse_function_list(content: &str) -> Result<Vec<FunctionSummary>> {
+    let mut functions = Vec::new();
+    for (index, line) in content.lines().enumerate() {
+        let line = line.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut fields = line.splitn(3, '\t');
+        let address = fields.next().unwrap_or("").trim();
+        let name = fields.next().unwrap_or("").trim();
+        let size = fields.next().unwrap_or("0").trim();
+
+        let address = address
+            .strip_prefix("0x")
+            .or_else(|| address.strip_prefix("0X"))
+            .unwrap_or(address);
+        let address = u64::from_str_radix(address, 16).with_context(|| {
+            format!(
+                "Invalid function address on line {}: {:?}",
+                index + 1,
+                address
+            )
+        })?;
+        let size = size.parse::<u64>().unwrap_or(0);
+        if name.is_empty() {
+            continue;
+        }
+        functions.push(FunctionSummary {
+            address,
+            name: name.to_string(),
+            size,
+        });
+    }
+    Ok(functions)
 }
 
 pub fn is_ghidra_install(path: &Path) -> bool {
@@ -779,5 +946,30 @@ GAME_OPT_ASM_BEGIN
 
         std::fs::write(support.join("analyzeHeadless"), "#!/bin/sh\n").unwrap();
         assert!(is_ghidra_install(dir.path()));
+    }
+
+    #[test]
+    fn parses_a_function_list_with_addresses_and_sizes() {
+        let functions =
+            parse_function_list("109214b6\tentry\t42\n10a00000\tFUN_10a00000\t128\n\n").unwrap();
+        assert_eq!(functions.len(), 2);
+        assert_eq!(
+            functions[0],
+            FunctionSummary {
+                address: 0x109214b6,
+                name: "entry".to_string(),
+                size: 42,
+            }
+        );
+        assert_eq!(functions[1].address, 0x10a00000);
+        assert_eq!(functions[1].size, 128);
+    }
+
+    #[test]
+    fn rejects_a_malformed_function_address() {
+        let error = parse_function_list("not-hex\tentry\t42\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Invalid function address"), "error: {error}");
     }
 }

@@ -32,6 +32,75 @@ use tracing::info;
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "game-opt-tool";
 
+/// Upper bound for any single MCP tool text, so one call cannot flood an
+/// agent's context window. Override with `GAME_OPT_MCP_MAX_BYTES`.
+const DEFAULT_MAX_RESPONSE_BYTES: usize = 60_000;
+const MIN_MAX_RESPONSE_BYTES: usize = 4_096;
+const MAX_MAX_RESPONSE_BYTES: usize = 1_048_576;
+/// Default pseudocode budget for one `decompile` page (~6k tokens).
+const DEFAULT_DECOMPILE_BYTES: usize = 24_000;
+/// Preview kept when an unexpected oversized response is capped.
+const MAX_PREVIEW_BYTES: usize = 8_192;
+
+/// Configured response budget per tool call.
+fn max_response_bytes() -> usize {
+    std::env::var("GAME_OPT_MCP_MAX_BYTES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .map(|value| value.clamp(MIN_MAX_RESPONSE_BYTES, MAX_MAX_RESPONSE_BYTES))
+        .unwrap_or(DEFAULT_MAX_RESPONSE_BYTES)
+}
+
+/// Slice `text` at char boundaries. Returns `(slice, next_offset, truncated)`.
+fn slice_text(text: &str, offset: usize, max_bytes: usize) -> (String, Option<usize>, bool) {
+    let total = text.len();
+    let mut start = offset.min(total);
+    while start > 0 && !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = start.saturating_add(max_bytes).min(total);
+    while end > start && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let truncated = end < total;
+    (
+        text[start..end].to_string(),
+        if truncated { Some(end) } else { None },
+        truncated,
+    )
+}
+
+/// Safety net for unexpectedly large JSON payloads. Keeps a bounded preview so
+/// file paths and manifest handles near the start remain visible.
+fn enforce_response_cap_with_limit(text: String, tool: &str, cap: usize) -> String {
+    if text.len() <= cap {
+        return text;
+    }
+
+    tracing::warn!(
+        "MCP response for '{}' was {} bytes (cap {}); truncating to protect agent context",
+        tool,
+        text.len(),
+        cap
+    );
+
+    let preview_budget = (cap / 2).min(MAX_PREVIEW_BYTES);
+    let (preview, _, _) = slice_text(&text, 0, preview_budget);
+    json!({
+        "truncated": true,
+        "tool": tool,
+        "total_bytes": text.len(),
+        "max_bytes": cap,
+        "preview": preview,
+        "note": "This response exceeded the MCP context budget. Use a narrower request: one function address, a smaller pagination window, or tail frames."
+    })
+    .to_string()
+}
+
+fn enforce_response_cap(text: String, tool: &str) -> String {
+    enforce_response_cap_with_limit(text, tool, max_response_bytes())
+}
+
 /// Run the MCP server over stdio (the transport OpenCode uses for local servers).
 pub async fn run_stdio() -> Result<()> {
     info!("MCP server starting on stdio");
@@ -233,12 +302,29 @@ fn tool_definitions() -> Value {
         ),
         tool(
             "decompile",
-            "Decompile a function with Ghidra headless and return C pseudocode plus assembly. Defaults to the executable entry point.",
+            "Decompile one function with Ghidra and return C pseudocode. Results are paginated: pass next_offset to continue. Assembly is omitted unless include_assembly is true.",
             json!({
                 "type": "object",
                 "properties": {
                     "game": { "type": "string", "description": "Path to the game executable." },
-                    "address": { "type": "string", "description": "Function address in hex (e.g. 0x109214b6). Optional." }
+                    "address": { "type": "string", "description": "Function address in hex (e.g. 0x109214b6). Optional; defaults to the entry point." },
+                    "offset": { "type": "integer", "minimum": 0, "description": "Byte offset into the pseudocode. Use next_offset from a previous call." },
+                    "max_bytes": { "type": "integer", "minimum": 1024, "description": "Maximum pseudocode bytes to return (default 24000)." },
+                    "include_assembly": { "type": "boolean", "description": "Also return disassembly (counts against the same budget). Default false." }
+                },
+                "required": ["game"]
+            })
+        ),
+        tool(
+            "list_functions",
+            "List function handles (address, name, size) without decompiling them. Use this to choose one function to decompile next.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "game": { "type": "string", "description": "Path to the game executable." },
+                    "filter": { "type": "string", "description": "Case-insensitive substring match on the function name." },
+                    "offset": { "type": "integer", "minimum": 0, "description": "Skip this many matching functions." },
+                    "limit": { "type": "integer", "minimum": 1, "description": "Maximum functions to return (default 200, max 1000)." }
                 },
                 "required": ["game"]
             })
@@ -344,6 +430,7 @@ async fn call_tool(params: &Value) -> Result<(String, bool)> {
     let result = match name {
         "game_info" => tool_game_info(&args),
         "decompile" => tool_decompile(&args).await,
+        "list_functions" => tool_list_functions(&args).await,
         "profile" => tool_profile(&args),
         "compare" => tool_compare(&args),
         "patch" => tool_patch(&args),
@@ -355,7 +442,12 @@ async fn call_tool(params: &Value) -> Result<(String, bool)> {
     };
 
     match result {
-        Ok(value) => Ok((serde_json::to_string_pretty(&value)?, false)),
+        Ok(value) => {
+            // Compact JSON keeps tool output small; pretty-printing wastes
+            // context on whitespace in the agent loop.
+            let text = serde_json::to_string(&value)?;
+            Ok((enforce_response_cap(text, name), false))
+        }
         Err(error) => Ok((format!("{error:#}"), true)),
     }
 }
@@ -413,7 +505,101 @@ async fn tool_decompile(args: &Value) -> Result<Value> {
         None => decompiler.decompile_entry(&game).await?,
     };
 
-    Ok(json!(function))
+    let include_assembly = opt_bool(args, "include_assembly");
+    let cap = max_response_bytes();
+    let requested_bytes = args
+        .get("max_bytes")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize);
+    let budget = requested_bytes
+        .unwrap_or(DEFAULT_DECOMPILE_BYTES)
+        .clamp(1_024, cap);
+    let pseudocode_budget = if include_assembly { budget / 2 } else { budget };
+
+    let offset = args
+        .get("offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let pseudocode_total = function.pseudocode.len();
+    let (pseudocode, next_offset, truncated) =
+        slice_text(&function.pseudocode, offset, pseudocode_budget);
+
+    let mut result = json!({
+        "name": function.name,
+        "address": function.address,
+        "signature": function.signature,
+        "return_type": function.return_type,
+        "parameters": function.parameters,
+        "pseudocode": pseudocode,
+        "pseudocode_total_bytes": pseudocode_total,
+        "offset": offset,
+        "next_offset": next_offset,
+        "truncated": truncated,
+        "max_bytes": budget,
+    });
+
+    if include_assembly {
+        let assembly_total = function.assembly.len();
+        let (assembly, _, assembly_truncated) =
+            slice_text(&function.assembly, 0, budget - pseudocode_budget);
+        result["assembly"] = json!(assembly);
+        result["assembly_total_bytes"] = json!(assembly_total);
+        result["assembly_truncated"] = json!(assembly_truncated);
+    }
+
+    Ok(result)
+}
+
+async fn tool_list_functions(args: &Value) -> Result<Value> {
+    use crate::decompiler::FunctionSummary;
+
+    let game_path = PathBuf::from(arg_str(args, "game")?);
+    if !game_path.exists() {
+        anyhow::bail!("Game path does not exist: {}", game_path.display());
+    }
+
+    let filter = opt_str(args, "filter").map(|value| value.to_lowercase());
+    let offset = args
+        .get("offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    // Keep the page safely inside the response budget; ~80 bytes per handle
+    // leaves room for long function names and JSON overhead.
+    let rows_by_budget = (max_response_bytes().saturating_sub(512) / 80).max(1);
+    let requested_limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(200)
+        .clamp(1, 1_000) as usize;
+    let limit = requested_limit.min(rows_by_budget);
+
+    let game = GameInfo::from_path(&game_path)?;
+    let decompiler = Decompiler::new()?;
+    let mut functions = decompiler.list_functions(&game).await?;
+    functions.sort_by_key(|function| function.address);
+
+    if let Some(filter) = filter.as_deref() {
+        functions.retain(|function| function.name.to_lowercase().contains(filter));
+    }
+
+    let total = functions.len();
+    let start = offset.min(total);
+    let end = start.saturating_add(limit).min(total);
+    let returned: Vec<FunctionSummary> = functions[start..end].to_vec();
+
+    Ok(json!({
+        "total_functions": total,
+        "returned": returned.len(),
+        "offset": start,
+        "limit": limit,
+        "next_offset": if end < total { Some(end) } else { None },
+        "truncated": end < total,
+        "functions": returned.iter().map(|function| json!({
+            "address": format!("0x{:X}", function.address),
+            "name": function.name,
+            "size": function.size,
+        })).collect::<Vec<_>>(),
+    }))
 }
 
 fn tool_profile(args: &Value) -> Result<Value> {
@@ -545,6 +731,7 @@ mod tests {
         for expected in [
             "game_info",
             "decompile",
+            "list_functions",
             "profile",
             "compare",
             "patch",
@@ -582,5 +769,43 @@ mod tests {
             .block_on(handle_message(&request))
             .expect("tools/call must respond");
         assert_eq!(response["result"]["isError"], true);
+    }
+
+    #[test]
+    fn slices_text_on_char_boundaries_with_a_continuation_offset() {
+        let text = "abcdefghij";
+        let (slice, next, truncated) = slice_text(text, 0, 4);
+        assert_eq!(slice, "abcd");
+        assert_eq!(next, Some(4));
+        assert!(truncated);
+
+        let (slice, next, truncated) = slice_text(text, 4, 100);
+        assert_eq!(slice, "efghij");
+        assert_eq!(next, None);
+        assert!(!truncated);
+
+        // Multi-byte characters must never be split.
+        let unicode = "aé€z";
+        let (slice, next, _) = slice_text(unicode, 0, 3);
+        assert!(unicode.is_char_boundary(next.unwrap_or(unicode.len())));
+        assert!(unicode.starts_with(&slice));
+    }
+
+    #[test]
+    fn caps_an_oversized_response_and_keeps_a_bounded_preview() {
+        let text = "x".repeat(50_000);
+        let capped = enforce_response_cap_with_limit(text, "demo", 10_000);
+        let value: Value = serde_json::from_str(&capped).unwrap();
+        assert_eq!(value["truncated"], true);
+        assert_eq!(value["tool"], "demo");
+        assert_eq!(value["total_bytes"], 50_000);
+        assert!(value["preview"].as_str().unwrap().len() <= 5_000);
+    }
+
+    #[test]
+    fn leaves_a_small_response_unchanged() {
+        let text = "{\"ok\":true}".to_string();
+        let capped = enforce_response_cap_with_limit(text.clone(), "demo", 10_000);
+        assert_eq!(capped, text);
     }
 }

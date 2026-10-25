@@ -98,7 +98,8 @@ Endpoint: `http://127.0.0.1:9000/mcp` (POST, JSON-RPC 2.0). The default bind is
 | Tool | What it does |
 |------|--------------|
 | `game_info` | Detect executable, format, architecture, entry point |
-| `decompile` | Ghidra headless → C pseudocode + assembly |
+| `list_functions` | Address/name/size handles only, paginated — pick one to decompile |
+| `decompile` | Ghidra headless → C pseudocode, paginated with `next_offset`; assembly opt-in |
 | `profile` | Frame-time stats: 1% low, 0.1% low, p99, stutter |
 | `compare` | Baseline vs patched frame-time comparison |
 | `patch` | Apply an expected-byte-verified JSON patch spec; writes a reversible manifest |
@@ -107,10 +108,29 @@ Endpoint: `http://127.0.0.1:9000/mcp` (POST, JSON-RPC 2.0). The default bind is
 | `backup_verify` | Re-check every existing backup |
 | `verify` | Compare original and patched binaries |
 
+## Context safety
+
+The server is built for a small agent context:
+
+- Every response is capped. Oversized output becomes a
+  `{"truncated": true, "total_bytes": ..., "preview": ...}` envelope and logs a
+  warning to stderr.
+- `decompile` returns at most 24 KB of pseudocode by default and includes
+  `next_offset`; pass it back as `offset` to continue. Assembly is excluded
+  unless `include_assembly` is true.
+- `list_functions` returns compact handles and paginates (`limit`, `offset`).
+- `profile`/`compare` return statistics, not raw rows.
+- Tune the hard cap with `GAME_OPT_MCP_MAX_BYTES` (4 KB–1 MB, default 60 KB).
+
+Nothing large is ever streamed through the model: binaries stay local, Ghidra
+runs locally, and the agent sees one bounded result at a time.
+
 ## Example agent prompts
 
 ```text
 Use game-opt-tool to inspect /games/DeusEx/System/DeusEx.exe and report the entry point.
+
+List the functions in DeusEx.exe, then decompile only the largest few, one at a time.
 
 Decompile the entry point, explain what it does, and suggest frame-time
 optimizations that preserve behavior.

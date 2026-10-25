@@ -69,7 +69,9 @@ cryptographic verification.
 
 ### 6. MCP Server (`src/mcp/mod.rs`)
 - JSON-RPC 2.0 over stdio (default) and HTTP (`--transport http`)
-- Nine tools wired to the real decompiler, profiler, patcher, backup, and verifier
+- Ten tools wired to the real decompiler, profiler, patcher, backup, and verifier
+- Context-safe by construction: per-call response cap, truncation envelopes,
+  paginated `decompile`, handle-only `list_functions`
 - stdout is protocol-only; logs go to stderr
 
 ## Commands Reference
@@ -92,7 +94,7 @@ cryptographic verification.
 
 ```bash
 ~/.cargo/bin/cargo test --all-targets
-# 156 tests passing (116 unit + 40 CLI/MCP end-to-end), 1 real-Ghidra test ignored
+# 162 tests passing (121 unit + 41 CLI/MCP end-to-end), 1 real-Ghidra test ignored
 
 ~/.cargo/bin/cargo build --release --bins
 # 0 errors, 5 warnings (pre-existing optimizer/verifier/backup dead code)
@@ -122,7 +124,7 @@ Backup check against `/path/to/your/game/DeusEx.exe`
 
 ## MCP Validation (2026-10-25)
 
-1. `mcp-server` over stdio answered `initialize`, `tools/list` (9 tools), and
+1. `mcp-server` over stdio answered `initialize`, `tools/list` (10 tools), and
    `ping`; notifications produced no responses.
 2. `tools/call game_info` against the real
    `/path/to/your/game/DeusEx.exe` returned
@@ -134,6 +136,12 @@ Backup check against `/path/to/your/game/DeusEx.exe`
    `POST http://127.0.0.1:<port>/mcp`.
 5. OpenCode registered the server globally and exposed the tools as
    `game-opt-tool.*` in a live session.
+6. `list_functions` returned 945 real Deus Ex handles; a 1000-row request was
+   budget-limited to 929 rows with `next_offset`, staying under 60 KB.
+7. `decompile` of the 22,221-byte largest function returned 2,048-byte pages
+   with `truncated: true` and a working `next_offset` (2,048 → 4,096).
+8. An oversized `patch` report was replaced by a bounded truncation envelope
+   that retained `manifest_path` in its preview.
 
 ## What is real
 
@@ -153,7 +161,7 @@ Backup check against `/path/to/your/game/DeusEx.exe`
 | Log discovery | Newest `.csv`/`.log` in a directory whose header contains `frametime` or `fps` |
 | A/B comparison | Deltas for average FPS, 1%/0.1% lows, p99 frame time, and stutter, with short-run/duration/scene notes |
 | PE byte patches | Strict PE parser, bounds-checked patches, expected-byte verification, code cave allocation, manifest-backed rollback |
-| MCP server | JSON-RPC 2.0 stdio + HTTP, initialize/tools-list/tools-call, nine real tools, tool-level error reporting; verified end-to-end against the real Deus Ex executable and a PE round-trip |
+| MCP server | JSON-RPC 2.0 stdio + HTTP, initialize/tools-list/tools-call, ten real tools, tool-level error reporting, response-size cap with truncation envelopes, paginated decompile and function listing; verified end-to-end against the real Deus Ex executable and a PE round-trip |
 
 ## What is still a stub
 

@@ -5,9 +5,12 @@ See [PREREQUISITES.md](PREREQUISITES.md) for setup instructions.
 
 ## Done
 
-- **MCP server** — stdio + HTTP transports, nine tools wired to the real
+- **MCP server** — stdio + HTTP transports, ten tools wired to the real
   decompiler, profiler, patcher, backup, and verifier. Tested end-to-end and
   connected to OpenCode. Use `./install_ai.sh` to register.
+- **Context safety** — per-call response cap (`GAME_OPT_MCP_MAX_BYTES`),
+  truncation envelopes with `truncated`/`next_offset`/`preview`, paginated
+  `decompile`, and handle-only paginated `list_functions`.
 
 ## Immediate
 
