@@ -21,7 +21,7 @@
 | Decompilation | **Working for one function at a time** — real Ghidra headless output; needs Ghidra 12.2 + JDK 25 |
 | Optimizer passes | **Stubs** — placeholder speedup values |
 | PE byte patches / code caves | **Working for PE** — `--spec` applies bounds-checked byte patches and optional appended executable sections; JSON manifest enables exact rollback via `unpatch`. Copy mode still writes a byte-identical copy. |
-| MCP server for AI agents | **Working, tested** — stdio and HTTP transports; nine tools wired to the real decompiler, profiler, patcher, backup, and verifier |
+| MCP server for AI agents | **Working, tested** — stdio and HTTP transports; ten tools wired to the real decompiler, profiler, patcher, backup, and verifier; responses are size-capped and decompilation is paginated |
 
 The tool does not fabricate frame-time measurements: when no log is available,
 `profile` fails with instructions and `analyze` explains how to generate one.
@@ -234,8 +234,23 @@ opencode mcp add game-opt-tool --global -- \
 # endpoint: http://127.0.0.1:9000/mcp
 ```
 
-Exposed tools: `game_info`, `decompile`, `profile`, `compare`, `patch`,
-`unpatch`, `backup`, `backup_verify`, `verify`.
+Exposed tools: `game_info`, `decompile`, `list_functions`, `profile`,
+`compare`, `patch`, `unpatch`, `backup`, `backup_verify`, `verify`.
+
+### Context safety
+
+MCP output is designed for an agent context window, not for dumping a binary:
+
+- Every tool response is capped; oversized responses are replaced with a
+  `{"truncated": true, ...}` envelope and a warning on stderr.
+- `decompile` returns pseudocode only (assembly is opt-in via
+  `include_assembly`) and is paginated: read `next_offset`, then call again
+  with `offset`. Default page: 24 KB (~6k tokens).
+- `list_functions` returns only address/name/size handles and is paginated, so
+  the agent can pick one function to decompile instead of reading everything.
+- `profile` and `compare` return statistics, never raw CSV rows.
+- Override the hard cap with `GAME_OPT_MCP_MAX_BYTES` (4 KB–1 MB, default
+  60 KB).
 
 The MCP server is local-only by default (`127.0.0.1`), stores no API keys, and
 calls exactly the same validated code paths as the CLI. The `decompile` tool
@@ -274,7 +289,10 @@ PE/ELF/Mach-O → entry point or --address → Ghidra headless → pseudocode + 
 AI agent (OpenCode / Claude Code / MCP client)
         │  JSON-RPC 2.0 (stdio or HTTP)
         ▼
-mcp-server → game_info / decompile / profile / compare / patch / unpatch / backup / verify
+mcp-server → game_info / decompile / list_functions / profile / compare / patch / unpatch / backup / verify
+        │
+        ▼
+bounded, paginated JSON (decompile pages, function handles, stats only)
         │
         ▼
 same validated code paths as the CLI
@@ -293,15 +311,16 @@ decompile one function (working) → rewrite → patch → runtime A/B verificat
 ~/.cargo/bin/cargo test
 ```
 
-Current suite: **156 tests passing** (116 unit + 40 end-to-end CLI/MCP tests),
+Current suite: **162 tests passing** (121 unit + 41 end-to-end CLI/MCP tests),
 plus one ignored real-Ghidra test. They cover SHA-256 NIST vectors,
 backup/restore round-trips, tampered and truncated backups, symlink refusal,
 permission preservation, PE/ELF/Mach-O magic detection, PE `MZ` detection,
 trampoline encoding and range checks, config parsing and name lookup, verifier
 truthfulness, MangoHud header/preamble and metric math, log discovery, A/B
-delta math and warnings, decompiler output parsing and address validation, MCP
-initialize/tools-list/stdio/HTTP behavior, MCP patch → unpatch exact-byte
-round-trips, and the real CLI backup → corrupt → revert flow.
+delta math and warnings, decompiler output parsing, function-list parsing,
+address validation, MCP initialize/tools-list/stdio/HTTP behavior, response
+capping and truncation envelopes, decompile pagination slicing, MCP patch →
+unpatch exact-byte round-trips, and the real CLI backup → corrupt → revert flow.
 
 Run the real Ghidra test explicitly (it takes about 30 seconds):
 

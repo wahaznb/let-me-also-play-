@@ -15,8 +15,16 @@ const ENTRY_VA: u64 = 0x0040_1000;
 /// Run one stdio session: write every request, close stdin, collect responses
 /// keyed by numeric id. Notifications produce no response and are skipped.
 fn stdio_session(requests: &[Value]) -> HashMap<i64, Value> {
-    let mut child = Command::new(BIN)
-        .arg("mcp-server")
+    stdio_session_with_env(requests, &[])
+}
+
+fn stdio_session_with_env(requests: &[Value], env: &[(&str, &str)]) -> HashMap<i64, Value> {
+    let mut command = Command::new(BIN);
+    command.arg("mcp-server");
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -136,6 +144,7 @@ fn stdio_initializes_and_lists_tools() {
     for expected in [
         "game_info",
         "decompile",
+        "list_functions",
         "profile",
         "compare",
         "patch",
@@ -258,6 +267,70 @@ fn stdio_backs_up_and_verifies_a_file() {
     assert_eq!(verify["backups"], 1);
     assert_eq!(verify["verified"], 1);
     assert_eq!(verify["failures"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn stdio_caps_oversized_tool_output_and_reports_truncation() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("game.exe");
+    let output = dir.path().join("patched.exe");
+    let original = pe32();
+    std::fs::write(&input, &original).unwrap();
+
+    // Enough distinct byte patches to make the JSON report exceed the cap.
+    let mut patches = Vec::new();
+    for index in 0..64u64 {
+        let file_offset = 0x400 + index as usize;
+        let before = original[file_offset];
+        patches.push(json!({
+            "address": format!("0x{:X}", ENTRY_VA + index),
+            "expected": format!("{before:02X}"),
+            "replace": format!("{:02X}", before ^ 0xFF),
+        }));
+    }
+    let spec = write_spec(
+        dir.path(),
+        "big-patch.json",
+        json!({ "schema_version": 1, "patches": patches }),
+    );
+
+    let responses = stdio_session_with_env(
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "patch",
+                "arguments": {
+                    "game": input.to_str().unwrap(),
+                    "output": output.to_str().unwrap(),
+                    "spec": spec.to_str().unwrap()
+                }
+            }
+        })],
+        &[("GAME_OPT_MCP_MAX_BYTES", "4096")],
+    );
+
+    assert!(
+        !is_error(&responses[&1]),
+        "patch failed: {}",
+        tool_text(&responses[&1])
+    );
+    let text = tool_text(&responses[&1]);
+    assert!(
+        text.len() <= 4_096,
+        "capped response was {} bytes",
+        text.len()
+    );
+    let capped: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(capped["truncated"], true);
+    assert_eq!(capped["tool"], "patch");
+    assert!(capped["total_bytes"].as_u64().unwrap() > 4_096);
+    assert!(
+        capped["preview"].as_str().unwrap().contains("manifest_path"),
+        "preview should keep the manifest handle: {}",
+        capped["preview"]
+    );
 }
 
 #[test]
