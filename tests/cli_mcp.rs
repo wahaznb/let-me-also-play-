@@ -145,6 +145,7 @@ fn stdio_initializes_and_lists_tools() {
         "game_info",
         "decompile",
         "list_functions",
+        "sample",
         "profile",
         "compare",
         "patch",
@@ -357,6 +358,63 @@ fn stdio_rejects_missing_required_arguments() {
 
     assert!(is_error(&responses[&1]));
     assert!(tool_text(&responses[&1]).contains("Missing required argument: game"));
+}
+
+#[test]
+fn stdio_sample_rejects_a_missing_game_without_starting_a_probe() {
+    let responses = stdio_session(&[json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "sample",
+            "arguments": {
+                "game": "/tmp/definitely-not-a-sample-game.exe",
+                "duration_secs": 1
+            }
+        }
+    })]);
+
+    assert!(is_error(&responses[&1]));
+    let text = tool_text(&responses[&1]);
+    assert!(
+        text.contains("Game executable not found"),
+        "sample should fail before touching perf: {text}"
+    );
+}
+
+#[test]
+fn stdio_sample_schema_requires_a_game_and_bounds_the_window() {
+    let responses = stdio_session(&[
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "protocolVersion": "2024-11-05" }
+        }),
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+    ]);
+
+    let tools = responses[&2]["result"]["tools"].as_array().unwrap();
+    let sample = tools
+        .iter()
+        .find(|tool| tool["name"] == "sample")
+        .expect("sample tool must be listed");
+    let schema = &sample["inputSchema"];
+    assert_eq!(schema["required"], json!(["game"]));
+    assert_eq!(schema["properties"]["duration_secs"]["minimum"], 1);
+    assert_eq!(schema["properties"]["duration_secs"]["maximum"], 120);
+    assert_eq!(schema["properties"]["frequency"]["minimum"], 1);
+    assert_eq!(schema["properties"]["frequency"]["maximum"], 999);
+    assert!(
+        sample["description"]
+            .as_str()
+            .unwrap()
+            .contains("perf_event_open"),
+        "the schema should name the sampling mechanism: {}",
+        sample["description"]
+    );
 }
 
 fn wait_for_port(port: u16) -> bool {

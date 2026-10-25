@@ -15,6 +15,7 @@ mod verifier;
 mod backup;
 mod hash;
 mod mcp;
+mod sampler;
 pub mod targets;
 
 use anyhow::{bail, Context, Result};
@@ -73,6 +74,45 @@ enum Command {
         /// Analyze only the last N frames (0 = all)
         #[arg(short, long, default_value = "0")]
         frames: u32,
+
+        /// Print machine-readable JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Sample CPU time per function from a running game
+    Sample {
+        /// Path to the game executable
+        #[arg(short, long)]
+        game: std::path::PathBuf,
+
+        /// Running game PID (default: find the process that maps --game)
+        #[arg(long, conflicts_with = "process")]
+        pid: Option<u32>,
+
+        /// Process name substring when --pid is not known (e.g. DeusEx.exe)
+        #[arg(long, conflicts_with = "pid")]
+        process: Option<String>,
+
+        /// Sampling duration in seconds
+        #[arg(short, long, default_value = "10", value_parser = clap::value_parser!(u64).range(1..=300))]
+        duration: u64,
+
+        /// Samples per second per thread
+        #[arg(long, default_value = "99", value_parser = clap::value_parser!(u32).range(1..=999))]
+        frequency: u32,
+
+        /// Number of functions to print
+        #[arg(long, default_value = "20", value_parser = clap::value_parser!(u64).range(1..=100))]
+        top: u64,
+
+        /// Do not resolve function names with Ghidra; report raw PE RVAs
+        #[arg(long)]
+        no_ghidra: bool,
+
+        /// Rebuild the cached Ghidra function list
+        #[arg(long, conflicts_with = "no_ghidra")]
+        refresh_functions: bool,
 
         /// Print machine-readable JSON instead of text
         #[arg(long)]
@@ -280,6 +320,31 @@ async fn main() -> Result<()> {
                 frames as usize,
                 json,
             )?;
+        }
+        Some(Command::Sample {
+            game,
+            pid,
+            process,
+            duration,
+            frequency,
+            top,
+            no_ghidra,
+            refresh_functions,
+            json,
+        }) => {
+            info!("Sampling game: {:?}", game);
+            sample_command(
+                &game,
+                pid,
+                process.as_deref(),
+                duration,
+                frequency,
+                top as usize,
+                !no_ghidra,
+                refresh_functions,
+                json,
+            )
+            .await?;
         }
         Some(Command::Compare { baseline, patched, frames, json }) => {
             info!("Comparing logs: {:?} vs {:?}", baseline, patched);
@@ -658,8 +723,8 @@ fn analyze_game(
             print_profile(&results);
             println!();
             println!(
-                "NOTE: function-level hotspots require CPU instrumentation and are not \
-                 inferred from frame times."
+                "NOTE: frame-time metrics do not identify which function is hot. Launch the \
+                 game and run `game-opt-tool sample --game <exe>` for per-function CPU samples."
             );
         }
         Err(error) if explicit_source => return Err(error),
@@ -705,6 +770,124 @@ fn profile_game(
     }
 
     Ok(())
+}
+
+async fn sample_command(
+    game_path: &Path,
+    pid: Option<u32>,
+    process: Option<&str>,
+    duration_secs: u64,
+    frequency: u32,
+    top: usize,
+    resolve_functions: bool,
+    refresh_functions: bool,
+    json: bool,
+) -> Result<()> {
+    use sampler::{run, SampleConfig};
+
+    let config = SampleConfig {
+        game: game_path.to_path_buf(),
+        pid,
+        process: process.map(str::to_string),
+        duration: std::time::Duration::from_secs(duration_secs),
+        frequency,
+        top,
+        refresh_functions,
+        resolve_functions,
+    };
+    let report = run(config).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_sample_report(&report);
+    }
+    Ok(())
+}
+
+fn print_sample_report(report: &sampler::SampleReport) {
+    println!(
+        "CPU sampling: PID {} ({}), {:.2}s at {} Hz, {} thread(s) started",
+        report.pid,
+        report.process,
+        report.duration_secs,
+        report.frequency_hz,
+        report.threads
+    );
+    println!("Game: {}", report.game);
+    println!(
+        "Samples: {} total, {} in game ({:.1}%), {} external, {} unknown-in-game, {} lost",
+        report.total_samples,
+        report.game_samples,
+        report.game_percent,
+        report.external_samples,
+        report.unknown_game_samples,
+        report.lost_samples
+    );
+    println!(
+        "Runtime base: {} (PE image base {}, {} bytes)",
+        report.runtime_base, report.image_base, report.image_size
+    );
+    println!(
+        "Effective sample rate: {:.1} samples/s",
+        report.effective_samples_per_sec
+    );
+
+    if report.function_map {
+        println!();
+        println!("Top functions by self CPU samples:");
+        if report.top_functions.is_empty() {
+            println!("  (no in-game samples matched a function)");
+        } else {
+            println!(
+                "{:<4} {:<12} {:>8} {:>8} {:>8}  Function",
+                "#", "Address", "Samples", "Game %", "Total %"
+            );
+            for (index, function) in report.top_functions.iter().enumerate() {
+                println!(
+                    "{:<4} {:<12} {:>8} {:>7.1}% {:>7.1}%  {} ({} bytes)",
+                    index + 1,
+                    function.address,
+                    function.samples,
+                    function.game_percent,
+                    function.total_percent,
+                    function.name,
+                    function.size
+                );
+            }
+        }
+    } else {
+        println!();
+        println!("Top raw PE offsets by self CPU samples:");
+        println!(
+            "{:<4} {:<12} {:<12} {:>8} {:>8}",
+            "#", "Address", "RVA", "Samples", "Game %"
+        );
+        for (index, offset) in report.top_offsets.iter().enumerate() {
+            println!(
+                "{:<4} {:<12} {:<12} {:>8} {:>7.1}%",
+                index + 1,
+                offset.address,
+                offset.offset,
+                offset.samples,
+                offset.game_percent
+            );
+        }
+    }
+
+    if !report.warnings.is_empty() {
+        println!();
+        println!("Warnings:");
+        for warning in &report.warnings {
+            println!("  - {}", warning);
+        }
+    }
+
+    println!();
+    println!("Notes:");
+    for note in &report.notes {
+        println!("  - {}", note);
+    }
 }
 
 fn resolve_log_path(
@@ -1142,6 +1325,18 @@ fn doctor_command(game: Option<&Path>) -> Result<()> {
                 println!("[warn] {}: not found on PATH ({})", binary, purpose);
                 warnings += 1;
             }
+        }
+    }
+
+    println!();
+    println!("CPU sampling:");
+    match sampler::probe_sampling() {
+        Ok(()) => println!(
+            "[ok]   perf_event_open: user-space CPU sampling is available"
+        ),
+        Err(error) => {
+            println!("[warn] sampling: {error}");
+            warnings += 1;
         }
     }
 
