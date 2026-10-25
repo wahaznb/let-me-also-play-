@@ -1,13 +1,15 @@
 # Game Opt Tool — Verified Status
 
-Last verified: 2026-10-24. Baseline commit `b27ad1e`.
+Last verified: 2026-10-26. Branch `feat/verified-safety-layer`.
 
 ## What this tool does
 
 This tool reverse-engineers and optimizes owned single-player game binaries.
 It focuses on **frame-time consistency** (1% lows) over raw FPS, preserves
 original behavior and quirks, and keeps every change **reversible** via
-cryptographic verification.
+cryptographic verification. Real per-function CPU sampling is available on
+Linux; it is evidence for a hypothesis, not proof of a frame-time win. See
+[METRICS.md](METRICS.md) for the measurement policy.
 
 ## Architecture
 
@@ -36,6 +38,10 @@ cryptographic verification.
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+The sampler (`src/sampler/`) is a separate Linux-only path: a running game's
+threads are sampled with `perf_event_open`, runtime IPs are mapped to PE RVAs,
+and the cached Ghidra function map turns them into per-function self CPU time.
 
 ## Core Components
 
@@ -67,9 +73,17 @@ cryptographic verification.
 - Frame-time metrics (avg, 1% low, p99, stutter)
 - A/B comparison between baseline and patched runs
 
-### 6. MCP Server (`src/mcp/mod.rs`)
+### 6. CPU Sampler (`src/sampler/`)
+- Linux `perf_event_open` per-thread user-space CPU-clock sampling
+- Runtime IP → PE RVA mapping through `/proc/<pid>/maps`
+- Cached Ghidra function map, raw-RVA fallback
+- Separates game / external / unknown samples; reports lost and overwritten data
+- Linux-only; returns a clear unsupported error on other platforms
+
+### 7. MCP Server (`src/mcp/mod.rs`)
 - JSON-RPC 2.0 over stdio (default) and HTTP (`--transport http`)
-- Ten tools wired to the real decompiler, profiler, patcher, backup, and verifier
+- Eleven tools wired to the real sampler, decompiler, profiler, patcher,
+  backup, and verifier
 - Context-safe by construction: per-call response cap, truncation envelopes,
   paginated `decompile`, handle-only `list_functions`
 - stdout is protocol-only; logs go to stderr
@@ -85,6 +99,7 @@ cryptographic verification.
 | `patch --spec` | Apply byte patches with manifest | `patch --game game.exe --output patched.exe --spec patch.json` |
 | `unpatch` | Rollback to original | `unpatch --manifest patched.exe.sha256.patch.json` |
 | `decompile` | Decompile function with Ghidra | `decompile --game game.exe --address 0x109214b6` |
+| `sample` | Per-function CPU sampling of a running game (Linux) | `sample --game game.exe --duration 20 --top 20` |
 | `profile` | Analyze MangoHud logs | `profile --game game.exe --log-frame.csv` |
 | `compare` | Compare two runs | `compare --baseline before.csv --patched after.csv` |
 | `doctor` | Check prerequisites | `doctor --game DeusEx.exe` |
@@ -94,7 +109,7 @@ cryptographic verification.
 
 ```bash
 ~/.cargo/bin/cargo test --all-targets
-# 162 tests passing (121 unit + 41 CLI/MCP end-to-end), 1 real-Ghidra test ignored
+# 193 passed, 0 failed, 1 ignored (real-Ghidra test)
 
 ~/.cargo/bin/cargo build --release --bins
 # 0 errors, 5 warnings (pre-existing optimizer/verifier/backup dead code)
@@ -103,13 +118,34 @@ cryptographic verification.
 The ignored real-Ghidra test was run explicitly with JDK 25 and Ghidra 12.2:
 
 ```bash
-export JAVA_HOME=/tmp/opencode/jdk25-full
-export GHIDRA_INSTALL_DIR=/tmp/opencode/ghidra_extracted/ghidra_12.2_PUBLIC
+export JAVA_HOME="$HOME/.local/opt/jdk-25.0.5+8"
+export GHIDRA_INSTALL_DIR="$HOME/.local/opt/ghidra_12.2_PUBLIC"
 export GAME_OPT_TEST_BINARY="/path/to/your/game/DeusEx.exe"
 ~/.cargo/bin/cargo test --test cli_decompile \
   decompiles_a_real_binary_entry_point -- --ignored
 # 1 passed; finished in 30.02s
 ```
+
+Sampler evidence:
+
+- Real `perf_event_open` probe succeeds at `perf_event_paranoid=2` without root.
+- A busy child process produced 198 samples in ~2 s in the standalone proof;
+  the in-tree busy-child and ring-wrap tests pass.
+- Deus Ex menu sampling: 20 s at 333 Hz, 5,352 total samples, 3 game, 5,349
+  external, 0 lost. This is an idle/menu workload, not a gameplay hotspot.
+- Real Ghidra `list_functions` returned 945 handles. The three menu sample IPs
+  resolved into real function ranges: `0x10902283 → FUN_10902020`,
+  `0x10902A6F → FUN_10902a20`, and `0x1091489A → FUN_109146fb`. The binary is
+  stripped, so these are analysis names, not source symbols. This validates the
+  sampler→Ghidra address mapping even though three samples are not a hotspot.
+- MCP `sample` was exercised over stdio against a process mapping the real PE
+  (a synthetic mapping test, not a game): 666 samples in 2 s at 333 Hz, all
+  external as expected, 0 lost, with the correct "no in-game samples" warning.
+  This validates the MCP transport and report shape; the live OpenCode process
+  still needs a restart to expose the new tool.
+- CLI/MCP `sample` tests cover help, argument conflicts, missing game, no
+  running process, PID zero, JSON-on-failure behavior, tool schema, and a
+  missing-game MCP tool error. They do not require `perf` permission.
 
 ## Real Binary Validation
 
@@ -122,9 +158,9 @@ Backup check against `/path/to/your/game/DeusEx.exe`
 3. A copy was overwritten with junk, then `revert` restored it.
 4. `cmp` and `sha256sum` confirmed byte-for-byte equality with the original.
 
-## MCP Validation (2026-10-25)
+## MCP Validation (2026-10-26)
 
-1. `mcp-server` over stdio answered `initialize`, `tools/list` (10 tools), and
+1. `mcp-server` over stdio answered `initialize`, `tools/list` (11 tools), and
    `ping`; notifications produced no responses.
 2. `tools/call game_info` against the real
    `/path/to/your/game/DeusEx.exe` returned
@@ -142,6 +178,13 @@ Backup check against `/path/to/your/game/DeusEx.exe`
    with `truncated: true` and a working `next_offset` (2,048 → 4,096).
 8. An oversized `patch` report was replaced by a bounded truncation envelope
    that retained `manifest_path` in its preview.
+9. `sample` is registered as the 11th tool with a bounded schema
+   (`duration_secs` 1–120, `frequency` 1–999) and fails cleanly for a missing
+   game. The CLI menu run produced 5,352 samples with 0 lost. MCP `sample` was
+   exercised against a synthetic mapped-PE process (666 samples, all external,
+   0 lost), which validates the transport and report shape. No MCP call has yet
+   sampled live gameplay, and the running OpenCode process predates the tool and
+   must be restarted after the release rebuild.
 
 ## What is real
 
@@ -161,17 +204,20 @@ Backup check against `/path/to/your/game/DeusEx.exe`
 | Log discovery | Newest `.csv`/`.log` in a directory whose header contains `frametime` or `fps` |
 | A/B comparison | Deltas for average FPS, 1%/0.1% lows, p99 frame time, and stutter, with short-run/duration/scene notes |
 | PE byte patches | Strict PE parser, bounds-checked patches, expected-byte verification, code cave allocation, manifest-backed rollback |
-| MCP server | JSON-RPC 2.0 stdio + HTTP, initialize/tools-list/tools-call, ten real tools, tool-level error reporting, response-size cap with truncation envelopes, paginated decompile and function listing; verified end-to-end against the real Deus Ex executable and a PE round-trip |
+| CPU sampling | Linux `perf_event_open`, per-thread user-space CPU clock, runtime IP → PE RVA, cached Ghidra function map, raw-RVA fallback, game/external/unknown split, lost-sample reporting; 21 sampler tests |
+| MCP server | JSON-RPC 2.0 stdio + HTTP, initialize/tools-list/tools-call, eleven real tools, tool-level error reporting, response-size cap with truncation envelopes, paginated decompile and function listing; verified end-to-end against the real Deus Ex executable and a PE round-trip |
 
-## What is still a stub
+## What is still a stub or a limit
 
 | Feature | Current behavior |
 |---------|------------------|
-| `analyze` hot functions | Not implemented; analyze reports measured frame times only and says so |
-| Automatic hot-function discovery | Not implemented; `decompile` needs an address or defaults to the entry point |
+| `analyze` hot functions | Analyze reports measured frame times and detection only; use `sample` for per-function CPU data |
 | `optimize` | Stub passes; speedup values are placeholders |
 | `verify` runtime behavior | Not implemented; only bytes are compared |
-| Launch automation | The user launches the game under MangoHud manually |
+| Sampler platforms | Linux only. Windows/macOS builds compile but return an unsupported error |
+| Sampler blind spots | Self CPU only; no GPU time, blocked time, kernel time, or call-graph attribution |
+| Launch automation | The user launches the game and captures MangoHud logs manually |
+| GPU/off-CPU attribution | Not measured; use PresentMon/MangoHud and treat CPU hotspots as hypotheses |
 
 ## Safety model
 

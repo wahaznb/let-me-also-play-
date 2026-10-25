@@ -371,6 +371,72 @@ Done! File is now byte-for-byte identical to original.
 | Signed PE (default) | Fail, suggest `allow_signed: true` |
 | Missing backup for in-place | Fail, suggest running `backup --game` first |
 
+## CPU Sampling Architecture
+
+`sample` is a Linux-only path that answers "where did this process spend CPU
+time?" It does not use the `perf` binary and does not require root at
+`perf_event_paranoid=2`.
+
+```
+game path + optional pid/process
+        │
+        ▼
+/proc/<pid>/maps ──► find the mapping for the PE ──► runtime base + image size
+        │
+        ▼
+for each thread: perf_event_open(PERF_TYPE_SOFTWARE,
+                                 PERF_COUNT_SW_CPU_CLOCK,
+                                 exclude_kernel=1, inherit=0)
+        │
+        ▼
+ring buffer ──► sample records (instruction pointer)
+        │
+        ▼
+IP - runtime base + image base ──► PE RVA
+        │
+        ├── outside the PE ──► external samples (Wine/ntdll/driver/OS)
+        └── inside the PE
+                ├── Ghidra function map hit ──► per-function self time
+                └── gap ──► unknown in-game samples
+        │
+        ▼
+bounded SampleReport: top functions/offsets, game/external/unknown,
+lost/overwritten counts, warnings
+```
+
+Implementation notes:
+
+- One event per thread with `inherit=0`; on this kernel `inherit=1` fails the
+  ring-buffer mmap with `EINVAL`.
+- User-space only: kernel time, blocked time, and GPU time are not sampled.
+- Function names come from a Ghidra function list cached by canonical path,
+  file size, and mtime; `--no-ghidra` reports raw RVAs.
+- The report is self CPU time, not inclusive/call-graph attribution.
+- Non-Linux builds return a clear unsupported error instead of failing to
+  compile.
+
+## MCP Architecture
+
+```
+agent (OpenCode / Claude Code / other MCP client)
+        │  JSON-RPC 2.0
+        ├── stdio (default)
+        └── HTTP POST http://127.0.0.1:<port>/mcp (--transport http)
+        ▼
+mcp-server ──► same validated command handlers as the CLI
+        │
+        ├── response JSON is capped at 60 KB by default
+        │   (GAME_OPT_MCP_MAX_BYTES, 4 KB–1 MB)
+        ├── oversized output becomes a truncation envelope with a preview
+        ├── decompile returns 24 KB pseudocode pages; assembly is opt-in
+        └── list_functions returns address/name/size handles only
+```
+
+Eleven tools: `game_info`, `decompile`, `list_functions`, `sample`, `profile`,
+`compare`, `patch`, `unpatch`, `backup`, `backup_verify`, `verify`. The MCP
+server never exposes raw shell access; stdout is protocol-only and logs go to
+stderr.
+
 ## Security Model
 
 1. **Input validation**: All user-provided values (addresses, bytes, paths) are validated before use.

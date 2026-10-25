@@ -27,21 +27,29 @@ See `INSTALL_AI.md` for copy-paste configurations.
 
 ## What the agent sees
 
-The server advertises ten tools (`game_info`, `list_functions`, `decompile`,
-`profile`, `compare`, `patch`, `unpatch`, `backup`, `backup_verify`, `verify`)
-with JSON schemas. It never exposes raw shell access. Results are bounded and
-paginated: decompilation arrives one function page at a time, function listing
-returns address/name/size handles only, and oversized payloads are replaced by
-a truncation envelope.
+The server advertises eleven tools (`game_info`, `list_functions`, `decompile`,
+`sample`, `profile`, `compare`, `patch`, `unpatch`, `backup`, `backup_verify`,
+`verify`) with JSON schemas. It never exposes raw shell access. Results are
+bounded and paginated: decompilation arrives one function page at a time,
+function listing returns address/name/size handles only, sampling returns a
+bounded ranked summary, and oversized payloads are replaced by a truncation
+envelope.
 
 ## Data flow
 
-1. The agent asks the tool to inspect or decompile a binary.
-2. The tool runs locally (Ghidra headless for decompilation).
-3. Tool output (pseudocode, stats, hashes) is returned to the agent.
+1. The agent asks the tool to inspect, decompile, or sample a running game.
+2. The tool runs locally (Ghidra headless for decompilation/name resolution;
+   `perf_event_open` for CPU samples).
+3. Tool output (pseudocode, sample counts, stats, hashes) is returned to the
+   agent.
 4. The agent reasons about it and requests a patch.
 5. The tool validates expected bytes, writes the output and a manifest.
 6. The agent can ask for exact rollback at any time.
+
+Sampling is Linux-only and requires `perf_event_open` access for the user
+running the MCP server; it does not need root at `perf_event_paranoid=2`. The
+agent must not treat a CPU hotspot as proof of a frame-time win; see
+`METRICS.md`.
 
 ## Local LLMs (Ollama)
 

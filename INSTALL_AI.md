@@ -10,8 +10,10 @@ system packages or `sudo` are required.
 | Need | Required for |
 |------|--------------|
 | Rust (stable) | Building the tool |
-| Ghidra + JDK | `decompile` tool only (see `INSTALL.md`) |
+| Ghidra + JDK | `decompile` tool and `sample` function-name resolution (see `INSTALL.md`) |
 | MangoHud CSV logs | `profile` / `compare` tools |
+| Linux + `perf_event_open` access | `sample` tool; no `sudo` needed at `perf_event_paranoid=2` |
+| A running game | `sample` only; the tool never launches it |
 
 You do **not** need Ollama or any local LLM for the MCP workflow. The agent
 you already use is the AI.
@@ -40,9 +42,10 @@ With an explicit path:
 /optimize-game /path/to/your/game/DeusEx.exe
 ```
 
-The command drives the inspect → decompile → dry-run → patch-a-copy → measure →
-compare loop and stops at each approval gate. [WORKFLOW.md](WORKFLOW.md)
-explains what you do, what the AI does, and what the tool does.
+The command drives the inspect → sample → decompile → dry-run → patch-a-copy →
+measure → compare loop and stops at each approval gate.
+[WORKFLOW.md](WORKFLOW.md) explains what you do, what the AI does, and what the
+tool does. [METRICS.md](METRICS.md) explains which numbers decide the verdict.
 
 ## Manual setup
 
@@ -119,6 +122,7 @@ Endpoint: `http://127.0.0.1:9000/mcp` (POST, JSON-RPC 2.0). The default bind is
 | `game_info` | Detect executable, format, architecture, entry point |
 | `list_functions` | Address/name/size handles only, paginated — pick one to decompile |
 | `decompile` | Ghidra headless → C pseudocode, paginated with `next_offset`; assembly opt-in |
+| `sample` | Real per-function self CPU samples from a running game (`perf_event_open`, Linux); resolves names with cached Ghidra |
 | `profile` | Frame-time stats: 1% low, 0.1% low, p99, stutter |
 | `compare` | Baseline vs patched frame-time comparison |
 | `patch` | Apply an expected-byte-verified JSON patch spec; writes a reversible manifest |
@@ -138,6 +142,8 @@ The server is built for a small agent context:
   `next_offset`; pass it back as `offset` to continue. Assembly is excluded
   unless `include_assembly` is true.
 - `list_functions` returns compact handles and paginates (`limit`, `offset`).
+- `sample` returns a bounded summary: top functions/offsets only, plus
+  game/external/unknown counts and warnings. It never returns raw IP lists.
 - `profile`/`compare` return statistics, not raw rows.
 - Tune the hard cap with `GAME_OPT_MCP_MAX_BYTES` (4 KB–1 MB, default 60 KB).
 
@@ -151,8 +157,8 @@ Use game-opt-tool to inspect /games/DeusEx/System/DeusEx.exe and report the entr
 
 List the functions in DeusEx.exe, then decompile only the largest few, one at a time.
 
-Decompile the entry point, explain what it does, and suggest frame-time
-optimizations that preserve behavior.
+Sample the running Deus Ex process for 20 seconds at 333 Hz, separate game from
+Wine/driver samples, and give me the top five game functions as hypotheses.
 
 Profile /tmp/mangohud.csv and tell me whether 1% lows improved.
 

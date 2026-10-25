@@ -2,8 +2,8 @@
 
 This is the honest workflow. **You** own the game and the decision. **The AI**
 reasons about decompiled code and proposes one patch at a time. **The tool**
-does the deterministic, reversible work: hashing, backups, Ghidra, statistics,
-and byte patches.
+does the deterministic, reversible work: hashing, backups, Ghidra, real CPU
+sampling, statistics, and byte patches.
 
 > There is no automatic optimizer yet. The `optimize` CLI subcommand is a stub:
 > it prints a warning and writes a byte-identical copy. Real changes go through
@@ -13,10 +13,10 @@ and byte patches.
 
 | | You (user) | AI (OpenCode) | Tool (game-opt-tool) |
 |---|---|---|---|
-| Owns | Game files, saves, play-testing, final decision | Analysis and the patch proposal | Deterministic local operations |
-| Reads | Tool reports, game behavior | Decompiled functions, profiles, manifests | Binary bytes, MangoHud CSV, Ghidra output |
-| Produces | Baseline/after runs, approvals | Candidate list, explanation, patch spec, verdict | Backup, patched copy, manifest, statistics |
-| Never | Apply a patch blindly or trust average FPS alone | Patch the original or claim an unmeasured speedup | Invent "optimized code" or launch the game |
+| Owns | Game files, saves, play-testing (optional), final decision | Analysis and the patch proposal | Deterministic local operations |
+| Reads | Tool reports, game behavior | Decompiled functions, CPU samples, profiles, manifests | Binary bytes, MangoHud CSV, `/proc`, Ghidra output |
+| Produces | Baseline/after runs, approvals | Candidate list with evidence, explanation, patch spec, verdict | Backup, patched copy, samples, manifest, statistics |
+| Never | Apply a patch blindly or trust average FPS alone | Patch the original or claim an unmeasured speedup | Invent "optimized code", launch the game, or call a CPU hotspot a proven win |
 
 ### You do
 
@@ -24,22 +24,28 @@ and byte patches.
 2. Capture the baseline and after runs with MangoHud. The tool never launches
    the game or plays it for you.
 3. Approve each gate. The command is designed to stop and wait.
-4. Play-test the patched copy for behavior and quirks.
+4. Optionally play-test the patched copy for behavior and quirks. If you skip
+   play-testing, the behavioral risk is unresolved and the AI must say so
+   rather than implying the patch is behaviorally verified.
 5. Decide **keep** or **discard** from the stats plus your own experience.
 6. Keep the original untouched and the patch manifest safe.
 
 ### The AI does
 
 1. Inspects the binary, architecture, entry point, and hash.
-2. Lists function handles and ranks a few candidates. This is a heuristic based
-   on names and sizes, **not** real per-function profiling data.
-3. Decompiles one function per call, summarizes it, and follows `next_offset`
+2. Runs `sample` while the game is at the chosen scene. Reports total, game,
+   external, and unknown samples, plus the top game functions. If sampling is
+   unavailable (non-Linux, perf denied, no running process), says so and labels
+   any name/size ranking as a heuristic.
+3. Lists function handles and ranks a few candidates using real sample counts
+   first, then names and sizes. It does not pretend a heuristic is a profile.
+4. Decompiles one function per call, summarizes it, and follows `next_offset`
    when a page is truncated.
-4. Proposes exactly one behavior-preserving patch as a JSON spec, with the
+5. Proposes exactly one behavior-preserving patch as a JSON spec, with the
    expected effect and risk.
-5. Runs the patch with `dry_run: true` before applying anything.
-6. Applies only to a copy, and only after your explicit approval.
-7. Reads `profile` / `compare` and gives an evidence-based keep/discard
+6. Runs the patch with `dry_run: true` before applying anything.
+7. Applies only to a copy, and only after your explicit approval.
+8. Reads `profile` / `compare` and gives an evidence-based keep/discard
    recommendation, including when the runs are too short to conclude.
 
 ### The tool does
@@ -48,6 +54,7 @@ and byte patches.
 |---|---|
 | `game_info` | PE/ELF/Mach-O detection, architecture, entry point, SHA-256 |
 | `list_functions` | Address/name/size handles only; paginated, no pseudocode |
+| `sample` | Real per-thread self CPU samples, mapped to PE RVAs and cached Ghidra functions; bounded top list; separates game/external/unknown and reports lost samples |
 | `decompile` | Real Ghidra headless output; one function, paginated, bounded |
 | `profile` | Avg FPS, 1% low, 0.1% low, p99 frame time, stutter ratio |
 | `compare` | Baseline vs patched deltas, with direction and warnings |
@@ -63,7 +70,8 @@ metadata.
 
 ### The tool does not do
 
-- Find hot functions by sampling. There is no sampling profiler yet.
+- See GPU time, blocked time, kernel time, or call-graph attribution. `sample`
+  is self CPU time only; a "hot" function can still be off the critical path.
 - Rewrite C pseudocode into machine code automatically.
 - Launch the game or capture frames.
 - Prove a patch is behaviorally correct at runtime.
@@ -73,15 +81,16 @@ metadata.
 
 | # | Step | Who | What happens | Gate |
 |---|---|---|---|---|
-| 0 | Setup | You + AI | `doctor`, Ghidra/Java check, path and scene confirmed | AI reports readiness |
+| 0 | Setup | You + AI | `doctor`, Ghidra/Java check, perf probe, path and scene confirmed | AI reports readiness |
 | 1 | Identify + protect | AI | `game_info`, `backup`, hash | **Stop.** You approve continuing |
 | 2 | Baseline | You, then AI | You capture a MangoHud run; AI runs `profile` | **Stop.** No baseline, no patch |
-| 3 | Candidates | AI | `list_functions` with `filter`/`limit`; rank 3–5 | **Stop.** You pick a function |
-| 4 | Decompile | AI | `decompile` one function, one page at a time | **Stop.** You approve drafting a patch |
-| 5 | Patch proposal | AI | JSON spec + `patch` with `dry_run: true` | **Stop.** You approve applying |
-| 6 | Apply to a copy | AI | Patch writes a copy + manifest | You launch and test that copy |
-| 7 | Compare | You, then AI | You capture the after run; AI runs `profile` + `compare` | **Stop.** Keep or discard |
-| 8 | Close | You | Keep manifest/copy, or discard the copy | Original hash unchanged |
+| 3 | Sample | You + AI | Game runs at the chosen scene; AI calls `sample` and reports game/external/unknown counts and top functions | **Stop.** You approve the sampling evidence |
+| 4 | Candidates | AI | `list_functions` with `filter`/`limit`; rank 3–5 using samples first, names/sizes second | **Stop.** You pick a function |
+| 5 | Decompile | AI | `decompile` one function, one page at a time | **Stop.** You approve drafting a patch |
+| 6 | Patch proposal | AI | JSON spec + `patch` with `dry_run: true` | **Stop.** You approve applying |
+| 7 | Apply to a copy | AI | Patch writes a copy + manifest | You launch and test that copy |
+| 8 | Compare | You, then AI | You capture the after run; AI runs `profile` + `compare` | **Stop.** Keep or discard |
+| 9 | Close | You | Keep manifest/copy, or discard the copy | Original hash unchanged |
 
 ### CLI equivalents
 
@@ -97,6 +106,7 @@ GAME="/path/to/your/game/DeusEx.exe"
 | Protect | `$BIN backup --game "$GAME"` |
 | Verify backups | `$BIN backup --game "$GAME" --verify` |
 | Baseline/after stats | `$BIN profile --game "$GAME" --log-dir /tmp/mangohud` |
+| CPU sample | `$BIN sample --game "$GAME" --duration 20 --frequency 333 --top 20` |
 | A/B comparison | `$BIN compare --baseline before.csv --patched after.csv` |
 | Decompile | `$BIN decompile --game "$GAME" --address 0x1090A050 --json` |
 | Patch dry run | `$BIN patch --game "$GAME" --output /tmp/DeusEx.patched.exe --spec /tmp/patch.json --dry-run` |
@@ -112,8 +122,14 @@ A patch is only a candidate until it survives measurement:
   Aim for at least 60 seconds; longer is better.
 - Judge **1% low, 0.1% low, p99 frame time, and stutter ratio** first.
   Average FPS is context, not the verdict.
+- A top function from `sample` is a hypothesis, not a verdict. CPU samples do
+  not see GPU time or blocked waits; if the frame-time evidence points at the
+  GPU or a wait, a CPU patch may change nothing.
 - One variable at a time: one patch, then one comparison.
 - Treat short runs, mismatched durations, and tail trimming as warnings.
+- Play-testing is your call, not a tool requirement. If you skip it, behavior
+  is not verified; say "behavior not play-tested" instead of "behavior
+  preserved".
 - Never say "faster" without a `compare` result. If the result is ambiguous,
   say it is ambiguous.
 
@@ -125,6 +141,8 @@ The tool is built for a ~16k-token working budget:
 - Follow `next_offset` when `truncated` is true; do not re-request the same page.
 - Use `list_functions` with `filter` and `limit` instead of dumping all 945
   handles.
+- Keep `sample` `top` small (10–20). The report is already bounded and separates
+  game from external samples; do not ask for raw IP lists.
 - Request `include_assembly` only when instruction-level detail matters.
 - If a response is replaced by a `{"truncated": true, ...}` envelope, narrow the
   request: one address, a smaller page, fewer frames.
@@ -170,22 +188,33 @@ cp .opencode/commands/optimize-game.md ~/.config/opencode/commands/
 
 ## Ghidra requirement
 
-`decompile` and `list_functions` need Ghidra and Java in the MCP server's
-environment:
+`decompile`, `list_functions`, and `sample` function-name resolution need
+Ghidra and Java in the MCP server's environment:
 
 ```bash
-export GHIDRA_INSTALL_DIR=/path/to/ghidra
-export JAVA_HOME=/path/to/jdk
+export GHIDRA_INSTALL_DIR="$HOME/.local/opt/ghidra_12.2_PUBLIC"
+export JAVA_HOME="$HOME/.local/opt/jdk-25.0.5+8"
 ```
 
-Everything else — backup, profile, compare, patch, unpatch, revert, verify —
-works without them. `doctor` reports what is missing.
+`sample --no-ghidra` and everything else — backup, profile, compare, patch,
+unpatch, revert, verify — works without them. `doctor` reports what is missing.
+
+Sampling also needs Linux `perf_event_open` access for the user running the
+tool; at `perf_event_paranoid=2` no `sudo` is needed. The game must already be
+running. `doctor` includes a sampling probe.
 
 ## Known limits
 
-- Hotspot discovery is manual. The profiler reports frame-time statistics, not
-  per-function samples.
-- Every Ghidra call re-analyzes the binary; expect ~20–30 seconds per call.
-- No automatic patch generation, runtime verification, or measured speedup has
-  shipped yet.
+- `sample` is Linux-only and measures **self CPU time** only. It does not see
+  GPU time, blocked time, kernel time, callers/callees, or display latency. A
+  hot function is not automatically a frame-time win.
+- Sampling a menu or idle scene produces mostly external Wine/driver samples.
+  Use a real gameplay scene for a meaningful ranking; the current Deus Ex menu
+  check was a correctness test, not a hotspot result.
+- Every Ghidra `decompile` call re-analyzes the binary; expect ~20–30 seconds
+  per call. `sample` reuses a cached function list after the first run.
+- No automatic patch generation, runtime behavioral verification, or measured
+  speedup has shipped yet.
 - The `optimize` subcommand remains a stub and is not part of this loop.
+- No GPU/off-CPU attribution is built in; use MangoHud/PresentMon for those
+  axes and read `METRICS.md` before interpreting a CPU hotspot.

@@ -16,6 +16,30 @@ need:
 
 The tool never downloads anything at runtime and does not contain telemetry.
 
+## Required for per-function CPU sampling
+
+`sample` is Linux-only and needs a **running** game. It uses
+`perf_event_open` directly; the `perf` binary is not required.
+
+| Requirement | Detail |
+|-------------|--------|
+| Linux kernel with `perf_event_open` | Tested on CachyOS x86_64 |
+| `perf_event_paranoid <= 2` | `1` or `2` works unprivileged; `3` and `4` deny unprivileged sampling |
+| Same user as the game | The sampler reads `/proc/<pid>/maps` and opens per-thread events |
+| No `sudo` | The tool never asks for root |
+| Ghidra + JDK (optional) | Only for function names; `--no-ghidra` reports raw PE RVAs |
+
+Check it with:
+
+```bash
+cat /proc/sys/kernel/perf_event_paranoid
+./target/release/game-opt-tool doctor
+```
+
+`doctor` prints a `perf_event_open` probe line. If sampling is denied, lower
+`perf_event_paranoid` (a system policy change) or run the tool with the
+capability your distribution requires. The tool itself never escalates.
+
 ## Required for frame-time measurement
 
 `profile` and `analyze --log` read MangoHud CSV logs. To produce those logs for
@@ -29,22 +53,24 @@ a Windows game you also need:
 For a native Linux game, Wine is not needed; launch the game through
 `mangohud` directly.
 
-## Required for decompilation
+## Required for decompilation and function names
 
-`decompile` runs Ghidra's headless analyzer and needs:
+`decompile` runs Ghidra's headless analyzer. `list_functions` and `sample`
+use the same Ghidra installation to resolve addresses to function names. They
+need:
 
 | Tool | Needed for | Status on this machine |
 |------|------------|------------------------|
-| Ghidra 12.2 | headless decompilation | installed under `/tmp/opencode/ghidra_extracted/ghidra_12.2_PUBLIC` |
-| Full JDK 25 | running Ghidra 12.2 | installed under `/tmp/opencode/jdk25-full` |
+| Ghidra 12.2 | headless decompilation and function names | installed under `~/.local/opt/ghidra_12.2_PUBLIC` |
+| Full JDK 25 | running Ghidra 12.2 | installed under `~/.local/opt/jdk-25.0.5+8` |
 
 Ghidra 12.2 requires Java **25**, not 21. A JRE is not enough; the JDK's
 `bin/javac` must exist. The tool does not install or download either one.
 
 ```bash
-export JAVA_HOME=/tmp/opencode/jdk25-full
+export JAVA_HOME="$HOME/.local/opt/jdk-25.0.5+8"
 export PATH="$JAVA_HOME/bin:$PATH"
-export GHIDRA_INSTALL_DIR=/tmp/opencode/ghidra_extracted/ghidra_12.2_PUBLIC
+export GHIDRA_INSTALL_DIR="$HOME/.local/opt/ghidra_12.2_PUBLIC"
 ```
 
 `GHIDRA_INSTALL_DIR` must point at the Ghidra root that contains
@@ -52,28 +78,30 @@ export GHIDRA_INSTALL_DIR=/tmp/opencode/ghidra_extracted/ghidra_12.2_PUBLIC
 
 `game-opt-tool doctor` reports all of the above. It exits non-zero only when a
 required safety/inspection check fails; missing Java/Ghidra are warnings.
+`sample --no-ghidra` works without Ghidra and reports raw PE RVAs.
 
 ### Portable setup without root
 
-The current setup was installed under `/tmp/opencode` to avoid system packages.
-A JDK 25 archive can be fetched from Adoptium and extracted with:
+The verified setup is installed under `~/.local/opt` to avoid system packages
+and to survive reboots. A JDK 25 archive can be fetched from Adoptium and
+extracted with:
 
 ```bash
-mkdir -p /tmp/opencode/jdk25-full
-curl -L -o /tmp/opencode/jdk25.tar.gz \
+mkdir -p "$HOME/.local/opt"
+curl -L -o /tmp/jdk25.tar.gz \
   'https://api.adoptium.net/v3/binary/latest/25/ga/linux/x64/jdk/hotspot/normal/eclipse'
-tar -xzf /tmp/opencode/jdk25.tar.gz \
-  -C /tmp/opencode/jdk25-full --strip-components=1
-test -x /tmp/opencode/jdk25-full/bin/javac
+mkdir -p "$HOME/.local/opt/jdk-25.0.5+8"
+tar -xzf /tmp/jdk25.tar.gz \
+  -C "$HOME/.local/opt/jdk-25.0.5+8" --strip-components=1
+test -x "$HOME/.local/opt/jdk-25.0.5+8/bin/javac"
 ```
 
 Download Ghidra 12.2 from <https://ghidra-sre.org/> (or its GitHub releases),
-unzip it, and set `GHIDRA_INSTALL_DIR` to the extracted
+unzip it under `~/.local/opt`, and set `GHIDRA_INSTALL_DIR` to the extracted
 `ghidra_12.2_PUBLIC` directory. Ghidra is Apache-2.0 licensed.
 
-`/tmp` is cleared on reboot. Keep the downloaded archives or move both
-directories to a persistent location such as `~/.local/opt`, then update
-`JAVA_HOME` and `GHIDRA_INSTALL_DIR`.
+The archive name may differ; the stable paths above are what this machine uses
+and what the OpenCode MCP registration points at.
 
 ### Install on CachyOS / Arch
 
@@ -141,11 +169,16 @@ cd /path/to/game-opt-tool
   --patched /tmp/mangohud/after.csv
 
 # 7. Decompile one function (entry point by default).
-export JAVA_HOME=/tmp/opencode/jdk25-full
+export JAVA_HOME="$HOME/.local/opt/jdk-25.0.5+8"
 export PATH="$JAVA_HOME/bin:$PATH"
-export GHIDRA_INSTALL_DIR=/tmp/opencode/ghidra_extracted/ghidra_12.2_PUBLIC
+export GHIDRA_INSTALL_DIR="$HOME/.local/opt/ghidra_12.2_PUBLIC"
 ./target/release/game-opt-tool decompile \
   --game "/path/to/your/game/DeusEx.exe"
+
+# 8. With the game running at the scene, sample CPU time per function.
+./target/release/game-opt-tool sample \
+  --game "/path/to/your/game/DeusEx.exe" \
+  --duration 20 --frequency 333 --top 20
 ```
 
 Use the same save, settings, and route for both captures. The comparison
@@ -176,6 +209,10 @@ cannot leave a half-written executable.
 | 1% low differs from MangoHud's summary | By design: this tool averages the slowest 1% of frame times; MangoHud's summary reports a percentile. See the README metric definitions. |
 | `compare` warns that run durations differ | Capture both runs for the same length and scene, or use `--frames` to trim both tails to the same frame count. |
 | `compare` warns about fewer than 1000 frames | The lows are not statistically stable yet. Capture a longer, representative run. |
+| `No running process maps <game>` | Launch the game first, or use `--process <name>`/`--pid <pid>` if the path mapping is ambiguous. |
+| `perf_event_open` permission denied | Check `/proc/sys/kernel/perf_event_paranoid`; the sampler needs `<= 2` for unprivileged use. `doctor` shows the probe result. |
+| Sampling reports mostly external samples | The game is idle, in a menu, or most CPU time is in Wine/driver code. Sample a real gameplay scene; external samples are not game hotspots. |
+| `Only ...% of in-game samples fell in gaps` | The Ghidra function map is stale or incomplete. Run with `--refresh-functions`, or use `--no-ghidra` for raw RVAs. |
 | `invalid type: map, expected a sequence` | Old build. Fixed: `config/games.yaml` is parsed as a full config, then looked up by game name. |
 | `No backups found` | Run `backup --game <file>` first. Backups only exist for files backed up by this tool. |
 | `Backup checksum mismatch` | The `.bak` file was modified or corrupted. Restore refuses on purpose; use another backup or the original media. |

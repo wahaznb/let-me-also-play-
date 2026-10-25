@@ -16,12 +16,13 @@
 | Revert with checksum verification and atomic write | **Working, tested** |
 | Frame-time profiling from MangoHud CSV | **Working, tested against a real MangoHud log** |
 | A/B log comparison | **Working, tested** — deltas for average FPS, 1%/0.1% lows, p99, and stutter |
-| `analyze` | Detection plus real frame-time summary when a log is available; function hotspots are not implemented |
+| `analyze` | Detection plus real frame-time summary when a log is available |
+| Per-function CPU sampling (`sample`) | **Working on Linux** — real `perf_event_open` self-CPU samples, per-thread, no `sudo`; Linux-only and blind to GPU/blocked time |
 | Verify | **Byte comparison only** — runtime equivalence is not implemented |
 | Decompilation | **Working for one function at a time** — real Ghidra headless output; needs Ghidra 12.2 + JDK 25 |
 | Optimizer passes | **Stubs** — placeholder speedup values |
 | PE byte patches / code caves | **Working for PE** — `--spec` applies bounds-checked byte patches and optional appended executable sections; JSON manifest enables exact rollback via `unpatch`. Copy mode still writes a byte-identical copy. |
-| MCP server for AI agents | **Working, tested** — stdio and HTTP transports; ten tools wired to the real decompiler, profiler, patcher, backup, and verifier; responses are size-capped and decompilation is paginated |
+| MCP server for AI agents | **Working, tested** — stdio and HTTP transports; eleven tools wired to the real sampler, decompiler, profiler, patcher, backup, and verifier; responses are size-capped and decompilation is paginated |
 
 The tool does not fabricate frame-time measurements: when no log is available,
 `profile` fails with instructions and `analyze` explains how to generate one.
@@ -57,9 +58,19 @@ Frame-time measurement additionally needs **MangoHud** and, for Windows games,
 ./target/release/game-opt-tool doctor --game "/path/to/DeusEx.exe"
 ```
 
+Per-function CPU sampling needs **Linux** with `perf_event_open` allowed for
+the current user. It is tested at `perf_event_paranoid=2` and needs no `sudo`
+and no `perf` binary. Sampling is not implemented on Windows or macOS.
+
 Decompilation additionally needs **Ghidra 12.2** and a full **JDK 25**. Ghidra
-12.2 rejects JDK 21 and JRE-only installations. See
-[PREREQUISITES.md](PREREQUISITES.md) for the current portable setup.
+12.2 rejects JDK 21 and JRE-only installations. The verified local install is:
+
+```bash
+export GHIDRA_INSTALL_DIR="$HOME/.local/opt/ghidra_12.2_PUBLIC"
+export JAVA_HOME="$HOME/.local/opt/jdk-25.0.5+8"
+```
+
+See [PREREQUISITES.md](PREREQUISITES.md) for the current portable setup.
 
 ## Quick start
 
@@ -89,6 +100,11 @@ cp "/path/to/your/game/DeusEx.exe" /tmp/DeusEx.exe
 # Decompile the executable's entry point with Ghidra
 ./target/release/game-opt-tool decompile \
   --game "/path/to/your/game/DeusEx.exe"
+
+# Sample CPU time per function while the game is running
+./target/release/game-opt-tool sample \
+  --game "/path/to/your/game/DeusEx.exe" \
+  --duration 20 --top 20
 ```
 
 ## Decompile a function
@@ -98,8 +114,8 @@ temporary project, and prints the pseudocode and function signature. With no
 `--address`, it uses the PE/ELF/Mach-O entry point:
 
 ```bash
-export JAVA_HOME=/tmp/opencode/jdk25-full
-export GHIDRA_INSTALL_DIR=/tmp/opencode/ghidra_extracted/ghidra_12.2_PUBLIC
+export JAVA_HOME="$HOME/.local/opt/jdk-25.0.5+8"
+export GHIDRA_INSTALL_DIR="$HOME/.local/opt/ghidra_12.2_PUBLIC"
 
 ./target/release/game-opt-tool decompile \
   --game "/path/to/your/game/DeusEx.exe"
@@ -118,9 +134,51 @@ export GHIDRA_INSTALL_DIR=/tmp/opencode/ghidra_extracted/ghidra_12.2_PUBLIC
 The command fails if Ghidra cannot start or returns no result. It never falls
 back to placeholder pseudocode. Each invocation re-analyzes the binary, which
 takes roughly 20–30 seconds for Deus Ex; project caching is not implemented yet.
-Automatic hot-function discovery is also not implemented, so pass a real
-address from a profiler or debugger. A decompiled function is not yet fed into
-the optimizer automatically.
+Use `sample` (below) to find a real hot address, or `list_functions` to browse
+handles. A decompiled function is not yet fed into the optimizer
+automatically.
+
+## Sample CPU time per function
+
+`sample` attaches to every thread of a running game with Linux
+`perf_event_open`, records instruction pointers on a user-space CPU clock,
+maps them through `/proc/<pid>/maps` to the PE image, and aggregates self CPU
+time by function. It does not use the `perf` binary and does not need root at
+`perf_event_paranoid=2`.
+
+```bash
+# Launch the game first, reach the scene, then sample it.
+./target/release/game-opt-tool sample \
+  --game "/path/to/your/game/DeusEx.exe" \
+  --duration 20 --frequency 333 --top 20
+
+# Raw PE RVAs when Ghidra is not configured:
+./target/release/game-opt-tool sample \
+  --game "/path/to/your/game/DeusEx.exe" \
+  --duration 10 --no-ghidra --json
+
+# Explicit process when the game path mapping is ambiguous:
+./target/release/game-opt-tool sample \
+  --game "/path/to/your/game/DeusEx.exe" \
+  --process DeusEx.exe --duration 10
+```
+
+The report separates **game**, **external** (Wine, ntdll, graphics driver,
+audio), and **unknown in-game** samples, and reports lost samples and
+ring-buffer overwrites. External samples are real CPU time, but they are not
+ranked as game functions. The first Ghidra-backed run builds a function map
+and can take ~30 seconds; later runs reuse the cache. `--refresh-functions`
+forces a rebuild.
+
+Read the result as one hypothesis, not a verdict. Sampler blind spots:
+
+- self CPU time only; callees are not attributed;
+- blocked time (locks, I/O, vsync) and kernel time are not sampled;
+- GPU busy time is invisible;
+- a hot function may not be on the frame-time critical path.
+
+Pair `sample` with `profile`/`compare` and read
+[METRICS.md](METRICS.md) before deciding that a CPU hotspot explains a hitch.
 
 ## Measure real frame times
 
@@ -199,14 +257,16 @@ the one used for optimization comparisons.
 |---------|--------------------|
 | `analyze --game <path> [--log <csv>] [--log-dir <dir>]` | Detects format/architecture and prints measured frame-time statistics when a log is available |
 | `profile --game <path> [--log <csv>] [--log-dir <dir>] [--frames N] [--json]` | Computes real metrics from a MangoHud CSV; `--frames` analyzes only the last N frames |
+| `sample --game <path> [--pid N\|--process NAME] [--duration N] [--frequency N] [--top N] [--no-ghidra] [--refresh-functions] [--json]` | Samples self CPU time per thread and resolves hot addresses through a cached Ghidra function map (Linux only) |
 | `compare --baseline <csv> --patched <csv> [--frames N] [--json]` | Compares two measured runs and reports per-metric deltas with interpretation notes |
 | `decompile --game <path> [--address <hex>] [--assembly] [--json]` | Decompiles one function with Ghidra; defaults to the executable entry point |
-| `optimize --game <path> --output <dir>` | Runs stub passes and writes a copy (placeholder speedups, clearly labeled) |
+| `optimize --game <path> --output <dir>` | Stub: writes a copy with placeholder speedups; not a working optimizer |
 | `patch --game <path> --output <file> [--spec <json>] [--manifest <json>] [--dry-run] [--json]` | Writes a byte-identical copy unless `--spec` is supplied; `--spec` applies bounds-checked byte patches and optional code caves, writes a manifest, and `unpatch` rolls back exactly |
+| `unpatch --manifest <json>` | Restores exactly the bytes recorded in a patch manifest |
 | `verify --original <a> --patched <b>` | Compares bytes; changed files fail until runtime verification exists |
 | `backup --game <file> [--list] [--verify]` | Creates, lists, or checks backups |
 | `revert --game <file> [--backup <manifest>] [--dry-run]` | Restores the newest or a specific verified backup |
-| `doctor [--game <path>]` | Checks config, tools, binary, and backup directory |
+| `doctor [--game <path>]` | Checks config, tools, binary, backup directory, and the sampling probe |
 | `mcp-server [--transport stdio\|http] [--host H] [--port P]` | Exposes the tools to AI agents over MCP (JSON-RPC 2.0); stdio by default |
 | `list-games`, `help <game>` | Lists configured targets / shows target notes |
 
@@ -234,8 +294,13 @@ opencode mcp add game-opt-tool --global -- \
 # endpoint: http://127.0.0.1:9000/mcp
 ```
 
-Exposed tools: `game_info`, `decompile`, `list_functions`, `profile`,
+Exposed tools: `game_info`, `decompile`, `list_functions`, `sample`, `profile`,
 `compare`, `patch`, `unpatch`, `backup`, `backup_verify`, `verify`.
+
+The `sample` tool needs a running game and Linux `perf_event_open` permission.
+`decompile`/`list_functions`/name resolution need Ghidra and Java in the MCP
+server's environment. `profile`/`compare` need a MangoHud CSV captured by you;
+the tool never launches the game.
 
 ### Guided optimization (`/optimize-game`)
 
@@ -247,11 +312,12 @@ With OpenCode running in this repository, start the whole safe loop with:
 /optimize-game /path/to/your/game/DeusEx.exe
 ```
 
-The command inspects and backs up the binary, profiles the baseline, lists
-function handles, decompiles one function at a time, drafts one patch spec,
-runs it with `dry_run`, applies only to a copy, then compares the runs. It
-stops for approval after each gate. See [WORKFLOW.md](WORKFLOW.md) for the
-user/AI/tool split, measurement rules, and limits.
+The command inspects and backs up the binary, profiles the baseline, samples
+the running game for real CPU hotspots, lists/decompiles one function at a
+time, drafts one patch spec, runs it with `dry_run`, applies only to a copy,
+then compares the runs. It stops for approval after each gate. See
+[WORKFLOW.md](WORKFLOW.md) for the user/AI/tool split, measurement rules, and
+limits, and [METRICS.md](METRICS.md) for the metric policy.
 
 ### Context safety
 
@@ -300,12 +366,17 @@ MangoHud CSV → header discovery → frame times → avg / lows / percentiles /
                                               ▼
                                      A/B compare (same scene)
 
+Running game → perf_event_open (per thread) → IP → /proc maps → PE RVA
+                              │
+                              ▼
+                    Ghidra function map (cached) → self CPU by function
+
 PE/ELF/Mach-O → entry point or --address → Ghidra headless → pseudocode + disassembly
 
 AI agent (OpenCode / Claude Code / MCP client)
         │  JSON-RPC 2.0 (stdio or HTTP)
         ▼
-mcp-server → game_info / decompile / list_functions / profile / compare / patch / unpatch / backup / verify
+mcp-server → game_info / decompile / list_functions / sample / profile / compare / patch / unpatch / backup / verify
         │
         ▼
 bounded, paginated JSON (decompile pages, function handles, stats only)
@@ -317,8 +388,10 @@ same validated code paths as the CLI
 Planned pipeline (not fully implemented):
 
 ```
-measure frame times → A/B compare runs → find hot functions (missing) →
-decompile one function (working) → rewrite → patch → runtime A/B verification
+measure frame times → A/B compare runs → sample CPU per function (working) →
+form one hypothesis → decompile one function (working) → hand-written patch →
+patch a copy (working) → matched runtime A/B compare (manual) →
+keep only if the tail improves and behavior is unchanged
 ```
 
 ## Tests
@@ -327,22 +400,25 @@ decompile one function (working) → rewrite → patch → runtime A/B verificat
 ~/.cargo/bin/cargo test
 ```
 
-Current suite: **162 tests passing** (121 unit + 41 end-to-end CLI/MCP tests),
-plus one ignored real-Ghidra test. They cover SHA-256 NIST vectors,
-backup/restore round-trips, tampered and truncated backups, symlink refusal,
-permission preservation, PE/ELF/Mach-O magic detection, PE `MZ` detection,
-trampoline encoding and range checks, config parsing and name lookup, verifier
-truthfulness, MangoHud header/preamble and metric math, log discovery, A/B
-delta math and warnings, decompiler output parsing, function-list parsing,
-address validation, MCP initialize/tools-list/stdio/HTTP behavior, response
-capping and truncation envelopes, decompile pagination slicing, MCP patch →
-unpatch exact-byte round-trips, and the real CLI backup → corrupt → revert flow.
+Current suite: **193 tests passing, 1 ignored** (142 unit + 51 end-to-end
+CLI/MCP tests, plus one ignored real-Ghidra test). They cover SHA-256 NIST
+vectors, backup/restore round-trips, tampered and truncated backups, symlink
+refusal, permission preservation, PE/ELF/Mach-O magic detection, PE `MZ`
+detection, trampoline encoding and range checks, config parsing and name
+lookup, verifier truthfulness, MangoHud header/preamble and metric math, log
+discovery, A/B delta math and warnings, decompiler output parsing,
+function-list parsing, address validation, MCP initialize/tools-list/stdio/HTTP
+behavior, response capping and truncation envelopes, decompile pagination
+slicing, MCP patch → unpatch exact-byte round-trips, the real CLI backup →
+corrupt → revert flow, the real `perf_event_open` probe, sampling a busy child,
+ring-buffer wrap handling, `/proc` map parsing, Ghidra function-map matching and
+cache behavior, and CLI/MCP `sample` validation and failure paths.
 
 Run the real Ghidra test explicitly (it takes about 30 seconds):
 
 ```bash
-export JAVA_HOME=/tmp/opencode/jdk25-full
-export GHIDRA_INSTALL_DIR=/tmp/opencode/ghidra_extracted/ghidra_12.2_PUBLIC
+export JAVA_HOME="$HOME/.local/opt/jdk-25.0.5+8"
+export GHIDRA_INSTALL_DIR="$HOME/.local/opt/ghidra_12.2_PUBLIC"
 export GAME_OPT_TEST_BINARY="/path/to/your/game/DeusEx.exe"
 ~/.cargo/bin/cargo test --test cli_decompile \
   decompiles_a_real_binary_entry_point -- --ignored
@@ -362,6 +438,16 @@ The real-world checks include:
 - Two genuine MangoHud captures of the same workload: `compare` reported
   average FPS `48.01 → 1382.81` but stutter ratio `1.06x → 58.71x`, correctly
   flagging the raw-FPS gain as a consistency regression.
+- Real per-function sampling on the Deus Ex menu: 20 seconds at 333 Hz produced
+  5,352 samples, 3 in the game module and 5,349 in external Wine/driver code,
+  with 0 samples lost. This is a real idle-workload measurement, not a
+  gameplay hotspot; it also shows why external samples are reported separately
+  instead of being blamed on the game. Sampler correctness is covered by the
+  busy-child and ring-wrap tests.
+- Real Ghidra symbol resolution: `list_functions` returned 945 Deus Ex handles
+  and the three menu sample addresses resolved to `FUN_10902020`,
+  `FUN_10902a20`, and `FUN_109146fb`. The binary is stripped, so these are
+  analysis names, not source symbols. Three samples do not rank hot functions.
 
 ## Legal
 
