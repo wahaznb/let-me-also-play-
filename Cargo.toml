@@ -46,9 +46,8 @@ object = "0.35"
 # Memory reading
 memmap2 = "0.9"
 
-# Optimization
-# LLVM bindings for code generation (optional, for advanced use)
-# llvm-sys = "0.0"  # Requires LLVM development headers
+# MCP server for AI agent integration (stdio + HTTP transports)
+axum = { version = "0.7", features = ["json"] }
 
 # Testing
 [dev-dependencies]

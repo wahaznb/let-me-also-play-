@@ -67,6 +67,11 @@ cryptographic verification.
 - Frame-time metrics (avg, 1% low, p99, stutter)
 - A/B comparison between baseline and patched runs
 
+### 6. MCP Server (`src/mcp/mod.rs`)
+- JSON-RPC 2.0 over stdio (default) and HTTP (`--transport http`)
+- Nine tools wired to the real decompiler, profiler, patcher, backup, and verifier
+- stdout is protocol-only; logs go to stderr
+
 ## Commands Reference
 
 | Command | Purpose | Example |
@@ -81,12 +86,13 @@ cryptographic verification.
 | `profile` | Analyze MangoHud logs | `profile --game game.exe --log-frame.csv` |
 | `compare` | Compare two runs | `compare --baseline before.csv --patched after.csv` |
 | `doctor` | Check prerequisites | `doctor --game DeusEx.exe` |
+| `mcp-server` | Expose tools to AI agents | `mcp-server` or `mcp-server --transport http --port 9000` |
 
 ## Test Evidence
 
 ```bash
 ~/.cargo/bin/cargo test --all-targets
-# 102 unit tests + 34 CLI end-to-end tests — all passing, 1 real-Ghidra test ignored
+# 156 tests passing (116 unit + 40 CLI/MCP end-to-end), 1 real-Ghidra test ignored
 
 ~/.cargo/bin/cargo build --release --bins
 # 0 errors, 5 warnings (pre-existing optimizer/verifier/backup dead code)
@@ -114,6 +120,21 @@ Backup check against `/path/to/your/game/DeusEx.exe`
 3. A copy was overwritten with junk, then `revert` restored it.
 4. `cmp` and `sha256sum` confirmed byte-for-byte equality with the original.
 
+## MCP Validation (2026-10-25)
+
+1. `mcp-server` over stdio answered `initialize`, `tools/list` (9 tools), and
+   `ping`; notifications produced no responses.
+2. `tools/call game_info` against the real
+   `/path/to/your/game/DeusEx.exe` returned
+   `DeusEx`, PE, x86, entry `0x109214B6`.
+3. `tools/call patch` with an expected-byte spec produced
+   `sha256 4c62ef92…6d677`; `tools/call unpatch` restored
+   `sha256 3e6fdb89…bae00e` exactly.
+4. HTTP transport answered `initialize` and tool calls at
+   `POST http://127.0.0.1:<port>/mcp`.
+5. OpenCode registered the server globally and exposed the tools as
+   `game-opt-tool.*` in a live session.
+
 ## What is real
 
 | Feature | Implementation |
@@ -132,6 +153,7 @@ Backup check against `/path/to/your/game/DeusEx.exe`
 | Log discovery | Newest `.csv`/`.log` in a directory whose header contains `frametime` or `fps` |
 | A/B comparison | Deltas for average FPS, 1%/0.1% lows, p99 frame time, and stutter, with short-run/duration/scene notes |
 | PE byte patches | Strict PE parser, bounds-checked patches, expected-byte verification, code cave allocation, manifest-backed rollback |
+| MCP server | JSON-RPC 2.0 stdio + HTTP, initialize/tools-list/tools-call, nine real tools, tool-level error reporting; verified end-to-end against the real Deus Ex executable and a PE round-trip |
 
 ## What is still a stub
 

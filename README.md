@@ -21,6 +21,7 @@
 | Decompilation | **Working for one function at a time** — real Ghidra headless output; needs Ghidra 12.2 + JDK 25 |
 | Optimizer passes | **Stubs** — placeholder speedup values |
 | PE byte patches / code caves | **Working for PE** — `--spec` applies bounds-checked byte patches and optional appended executable sections; JSON manifest enables exact rollback via `unpatch`. Copy mode still writes a byte-identical copy. |
+| MCP server for AI agents | **Working, tested** — stdio and HTTP transports; nine tools wired to the real decompiler, profiler, patcher, backup, and verifier |
 
 The tool does not fabricate frame-time measurements: when no log is available,
 `profile` fails with instructions and `analyze` explains how to generate one.
@@ -206,12 +207,39 @@ the one used for optimization comparisons.
 | `backup --game <file> [--list] [--verify]` | Creates, lists, or checks backups |
 | `revert --game <file> [--backup <manifest>] [--dry-run]` | Restores the newest or a specific verified backup |
 | `doctor [--game <path>]` | Checks config, tools, binary, and backup directory |
+| `mcp-server [--transport stdio\|http] [--host H] [--port P]` | Exposes the tools to AI agents over MCP (JSON-RPC 2.0); stdio by default |
 | `list-games`, `help <game>` | Lists configured targets / shows target notes |
 
 If neither `--log` nor `--log-dir` is given, `profile` looks for the newest
 MangoHud log in the current directory.
 
 Global flags: `--help`, `--version`.
+
+## Use with an AI agent (MCP)
+
+The tool exposes its real commands as MCP tools, so an agent such as OpenCode
+or Claude Code can inspect, decompile, profile, patch, and revert a binary
+without shell access.
+
+```bash
+# Build and register with OpenCode (no sudo, no LLM download)
+./install_ai.sh
+
+# Or register manually
+opencode mcp add game-opt-tool --global -- \
+  "$PWD/target/release/game-opt-tool" mcp-server
+
+# HTTP mode for remote/self-hosted agents
+./target/release/game-opt-tool mcp-server --transport http --port 9000
+# endpoint: http://127.0.0.1:9000/mcp
+```
+
+Exposed tools: `game_info`, `decompile`, `profile`, `compare`, `patch`,
+`unpatch`, `backup`, `backup_verify`, `verify`.
+
+The MCP server is local-only by default (`127.0.0.1`), stores no API keys, and
+calls exactly the same validated code paths as the CLI. See
+[INSTALL_AI.md](INSTALL_AI.md) and [AI_PROVIDERS.md](AI_PROVIDERS.md).
 
 ## Supported games
 
@@ -239,6 +267,14 @@ MangoHud CSV → header discovery → frame times → avg / lows / percentiles /
                                      A/B compare (same scene)
 
 PE/ELF/Mach-O → entry point or --address → Ghidra headless → pseudocode + disassembly
+
+AI agent (OpenCode / Claude Code / MCP client)
+        │  JSON-RPC 2.0 (stdio or HTTP)
+        ▼
+mcp-server → game_info / decompile / profile / compare / patch / unpatch / backup / verify
+        │
+        ▼
+same validated code paths as the CLI
 ```
 
 Planned pipeline (not fully implemented):
@@ -254,14 +290,15 @@ decompile one function (working) → rewrite → patch → runtime A/B verificat
 ~/.cargo/bin/cargo test
 ```
 
-Current suite: **79 unit tests + 25 end-to-end CLI tests**, all passing, plus one
-ignored real-Ghidra test. They cover SHA-256 NIST vectors, backup/restore
-round-trips, tampered and truncated backups, symlink refusal, permission
-preservation, PE/ELF/Mach-O magic detection, PE `MZ` detection, trampoline
-encoding and range checks, config parsing and name lookup, verifier
+Current suite: **156 tests passing** (116 unit + 40 end-to-end CLI/MCP tests),
+plus one ignored real-Ghidra test. They cover SHA-256 NIST vectors,
+backup/restore round-trips, tampered and truncated backups, symlink refusal,
+permission preservation, PE/ELF/Mach-O magic detection, PE `MZ` detection,
+trampoline encoding and range checks, config parsing and name lookup, verifier
 truthfulness, MangoHud header/preamble and metric math, log discovery, A/B
-delta math and warnings, decompiler output parsing and address validation, and
-the real CLI backup → corrupt → revert flow.
+delta math and warnings, decompiler output parsing and address validation, MCP
+initialize/tools-list/stdio/HTTP behavior, MCP patch → unpatch exact-byte
+round-trips, and the real CLI backup → corrupt → revert flow.
 
 Run the real Ghidra test explicitly (it takes about 30 seconds):
 
