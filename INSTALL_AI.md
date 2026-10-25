@@ -25,6 +25,25 @@ you already use is the AI.
 The script builds the release binary, smoke-tests the MCP server, and
 registers it with OpenCode and/or Claude Code when installed.
 
+## Guided session (OpenCode)
+
+After the server is connected, restart OpenCode once if you just rebuilt it, then
+run this in the repository:
+
+```text
+/optimize-game
+```
+
+With an explicit path:
+
+```text
+/optimize-game /path/to/your/game/DeusEx.exe
+```
+
+The command drives the inspect → decompile → dry-run → patch-a-copy → measure →
+compare loop and stops at each approval gate. [WORKFLOW.md](WORKFLOW.md)
+explains what you do, what the AI does, and what the tool does.
+
 ## Manual setup
 
 ### OpenCode

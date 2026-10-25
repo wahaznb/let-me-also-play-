@@ -237,6 +237,22 @@ opencode mcp add game-opt-tool --global -- \
 Exposed tools: `game_info`, `decompile`, `list_functions`, `profile`,
 `compare`, `patch`, `unpatch`, `backup`, `backup_verify`, `verify`.
 
+### Guided optimization (`/optimize-game`)
+
+With OpenCode running in this repository, start the whole safe loop with:
+
+```text
+/optimize-game
+# or
+/optimize-game /path/to/your/game/DeusEx.exe
+```
+
+The command inspects and backs up the binary, profiles the baseline, lists
+function handles, decompiles one function at a time, drafts one patch spec,
+runs it with `dry_run`, applies only to a copy, then compares the runs. It
+stops for approval after each gate. See [WORKFLOW.md](WORKFLOW.md) for the
+user/AI/tool split, measurement rules, and limits.
+
 ### Context safety
 
 MCP output is designed for an agent context window, not for dumping a binary:
