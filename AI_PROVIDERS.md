@@ -27,9 +27,12 @@ See `INSTALL_AI.md` for copy-paste configurations.
 
 ## What the agent sees
 
-The server advertises nine tools (`game_info`, `decompile`, `profile`,
-`compare`, `patch`, `unpatch`, `backup`, `backup_verify`, `verify`) with JSON
-schemas. It never exposes raw shell access.
+The server advertises ten tools (`game_info`, `list_functions`, `decompile`,
+`profile`, `compare`, `patch`, `unpatch`, `backup`, `backup_verify`, `verify`)
+with JSON schemas. It never exposes raw shell access. Results are bounded and
+paginated: decompilation arrives one function page at a time, function listing
+returns address/name/size handles only, and oversized payloads are replaced by
+a truncation envelope.
 
 ## Data flow
 
