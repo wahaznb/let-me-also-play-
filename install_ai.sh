@@ -47,12 +47,20 @@ echo "[3/3] Registering with installed agents..."
 REGISTERED=0
 
 if command -v opencode >/dev/null 2>&1; then
-    if opencode mcp add game-opt-tool --global -- "$BIN" mcp-server >/dev/null 2>&1; then
-        echo "      OpenCode: registered globally (game-opt-tool)"
+    if opencode mcp list 2>/dev/null | grep -q "game-opt-tool"; then
+        echo "      OpenCode: already registered; leaving configuration unchanged"
         REGISTERED=1
     else
-        echo "      OpenCode: automatic registration failed; add this to your opencode.json:"
-        echo "      { \"mcp\": { \"servers\": { \"game-opt-tool\": { \"type\": \"local\", \"command\": [\"$BIN\", \"mcp-server\"] } } } }"
+        OPENCODE_ENV=()
+        [ -n "${GHIDRA_INSTALL_DIR:-}" ] && OPENCODE_ENV+=(--env "GHIDRA_INSTALL_DIR=$GHIDRA_INSTALL_DIR")
+        [ -n "${JAVA_HOME:-}" ] && OPENCODE_ENV+=(--env "JAVA_HOME=$JAVA_HOME")
+        if opencode mcp add game-opt-tool --global "${OPENCODE_ENV[@]}" -- "$BIN" mcp-server >/dev/null 2>&1; then
+            echo "      OpenCode: registered globally (game-opt-tool)"
+            REGISTERED=1
+        else
+            echo "      OpenCode: automatic registration failed; add this to your opencode.json:"
+            echo "      { \"mcp\": { \"servers\": { \"game-opt-tool\": { \"type\": \"local\", \"command\": [\"$BIN\", \"mcp-server\"] } } } }"
+        fi
     fi
 else
     echo "      OpenCode: not installed (skipped)"

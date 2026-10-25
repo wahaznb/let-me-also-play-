@@ -34,6 +34,19 @@ opencode mcp add game-opt-tool --global -- \
   /path/to/game-opt-tool/target/release/game-opt-tool mcp-server
 ```
 
+If you want the `decompile` tool to work, the server needs Ghidra and Java.
+Either export them in the shell that launches OpenCode, or pass them at
+registration time:
+
+```bash
+opencode mcp add game-opt-tool --global \
+  --env GHIDRA_INSTALL_DIR=/opt/ghidra \
+  --env JAVA_HOME=/usr/lib/jvm/jdk-25 \
+  -- /path/to/game-opt-tool/target/release/game-opt-tool mcp-server
+```
+
+`game-opt-tool doctor` reports whether Ghidra and Java are visible.
+
 `mcp-server` defaults to stdio, which is what local agents expect.
 
 Equivalent `opencode.json` entry (this is the shape OpenCode 2.x writes):

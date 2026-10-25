@@ -238,8 +238,11 @@ Exposed tools: `game_info`, `decompile`, `profile`, `compare`, `patch`,
 `unpatch`, `backup`, `backup_verify`, `verify`.
 
 The MCP server is local-only by default (`127.0.0.1`), stores no API keys, and
-calls exactly the same validated code paths as the CLI. See
-[INSTALL_AI.md](INSTALL_AI.md) and [AI_PROVIDERS.md](AI_PROVIDERS.md).
+calls exactly the same validated code paths as the CLI. The `decompile` tool
+needs `GHIDRA_INSTALL_DIR` and `JAVA_HOME` in the server's environment; pass
+them with `opencode mcp add --env KEY=VALUE ...` or export them before
+launching the agent. See [INSTALL_AI.md](INSTALL_AI.md) and
+[AI_PROVIDERS.md](AI_PROVIDERS.md).
 
 ## Supported games
 
