@@ -63,9 +63,11 @@ The code uses `#[cfg]` attributes for platform-specific behavior:
 | `backup/mod.rs` | `sync_all`, permissions | `remove_file` before rename |
 | `decompiler/mod.rs` | `analyzeHeadless` | `analyzeHeadless.bat` |
 | `patcher/mod.rs` | symlink tests, permissions | N/A |
+| `sampler/` | Linux `perf_event_open` + `/proc` | unsupported stub with a clear error |
 | `game/mod.rs` | Linux/macOS detection | Windows detection |
 
-macOS is covered by `#[cfg(unix)]` — same as Linux.
+macOS is covered by `#[cfg(unix)]` — same as Linux, except the sampler is
+gated to `target_os = "linux"` and returns an unsupported error on macOS.
 
 ## Known Issues
 
@@ -76,6 +78,7 @@ macOS is covered by `#[cfg(unix)]` — same as Linux.
 | Case sensitivity | Windows is case-insensitive |
 | Antivirus | May flag patched executables |
 | No MangoHud | Frame profiling not available on Windows or macOS |
+| No CPU sampler outside Linux | `sample` returns "only implemented on Linux" on Windows/macOS |
 | Wine on macOS | Not installed, Windows games need it |
 
 ## CI Artifacts

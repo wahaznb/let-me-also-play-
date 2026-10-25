@@ -25,11 +25,14 @@ The binary will be at `target/release/game-opt-tool`.
 
 # Revert a patch
 ./target/release/game-opt-tool unpatch --manifest patched.exe.*.patch.json
+
+# Sample CPU time per function while the game runs (Linux)
+./target/release/game-opt-tool sample --game game.exe --duration 20 --top 20
 ```
 
-## Optional: Decompilation Support
+## Optional: Decompilation and Function Names
 
-To use the `decompile` command, you need:
+To use `decompile`, `list_functions`, or name resolution in `sample`, you need:
 
 1. **JDK 25** (full JDK, not JRE)
    - Download from https://adoptium.net/
@@ -54,6 +57,9 @@ Then:
 
 ### Linux
 - Backup/patch commands work immediately after building
+- CPU sampling needs `perf_event_open` access for your user; check
+  `/proc/sys/kernel/perf_event_paranoid` (1 or 2 works without root) and run
+  `game-opt-tool doctor` to see the probe result
 - MangoHud optional for frame profiling (sudo pacman -S mangohud)
 - Wine optional for running Windows games
 
@@ -61,6 +67,7 @@ Then:
 - Close the game before patching (file locking)
 - Use a writable directory (not Program Files)
 - Antivirus may flag patched executables
+- `sample` is Linux-only; it returns an unsupported error on Windows
 
 ## Storage Requirements
 
