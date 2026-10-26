@@ -2,13 +2,17 @@
 
 ## Supported Targets
 
-| Target | Toolchain | CI | Local | Notes |
-|--------|-----------|-----|-------|-------|
-| `x86_64-unknown-linux-gnu` | Native | ✅ | ✅ | CachyOS, Ubuntu |
-| `x86_64-pc-windows-msvc` | Visual Studio | ✅ | ❌ | Windows 10/11 |
-| `x86_64-pc-windows-gnu` | MinGW-w64 | ✅ | ❌ (root) | Windows 10/11 |
-| `x86_64-apple-darwin` | macOS Xcode | ✅ | ❌ | Intel Mac |
-| `aarch64-apple-darwin` | macOS Xcode | ✅ | ❌ | Apple Silicon Mac |
+| Target | Toolchain | CI job | Verified locally | Notes |
+|--------|-----------|--------|------------------|-------|
+| `x86_64-unknown-linux-gnu` | Native | Configured | ✅ | Tested on CachyOS/Arch |
+| `x86_64-pc-windows-msvc` | Visual Studio | Configured | ❌ | Needs a Windows host |
+| `x86_64-pc-windows-gnu` | MinGW-w64 | Configured | Cross-check only | `cargo check` passes; linking needs `mingw-w64` |
+| `x86_64-apple-darwin` | macOS Xcode | Configured | ❌ | Needs a macOS host |
+| `aarch64-apple-darwin` | macOS Xcode | Configured | ❌ | Needs an Apple Silicon host |
+
+"Configured" means `.github/workflows/build.yml` defines the job. The jobs
+have not run yet because this repository has not been pushed; treat CI status
+as unverified until the first push completes.
 
 ## Why macOS Was Re-added
 
@@ -27,9 +31,10 @@ cargo build --release
 cargo test --all-targets
 ```
 
-### Windows (needs root or WSL)
+### Windows cross-build (optional, no root required for the build itself)
 ```bash
-# Install mingw-w64
+# Install the MinGW-w64 toolchain with your system package manager
+# (the package install may prompt for your normal sudo password)
 sudo pacman -S mingw-w64-gcc
 
 # Add target

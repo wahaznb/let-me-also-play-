@@ -68,7 +68,7 @@ and the cached Ghidra function map turns them into per-function self CPU time.
 - Entry-point auto-detection
 - Pseudocode + assembly output
 
-### 5. MangoHud Profiler (`src/profiler/mod.rs`)
+### 5. Frame-Time Profiler (`src/profiler/mod.rs`)
 - CSV log ingestion
 - Frame-time metrics (avg, 1% low, p99, stutter)
 - A/B comparison between baseline and patched runs
@@ -108,10 +108,10 @@ and the cached Ghidra function map turns them into per-function self CPU time.
 ## Test Evidence
 
 ```bash
-~/.cargo/bin/cargo test --all-targets
+cargo test --all-targets
 # 194 passed, 0 failed, 1 ignored (real-Ghidra test)
 
-~/.cargo/bin/cargo build --release --bins
+cargo build --release --bins
 # 0 errors, 5 warnings (pre-existing optimizer/verifier/backup dead code)
 ```
 
@@ -121,7 +121,7 @@ The ignored real-Ghidra test was run explicitly with JDK 25 and Ghidra 12.2:
 export JAVA_HOME="$HOME/.local/opt/jdk-25.0.5+8"
 export GHIDRA_INSTALL_DIR="$HOME/.local/opt/ghidra_12.2_PUBLIC"
 export GAME_OPT_TEST_BINARY="/path/to/your/game/DeusEx.exe"
-~/.cargo/bin/cargo test --test cli_decompile \
+cargo test --test cli_decompile \
   decompiles_a_real_binary_entry_point -- --ignored
 # 1 passed; finished in 30.02s
 ```

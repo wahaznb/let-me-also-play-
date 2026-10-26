@@ -76,7 +76,7 @@ See [PREREQUISITES.md](PREREQUISITES.md) for the current portable setup.
 
 ```bash
 # Build
-~/.cargo/bin/cargo build --release --bins
+cargo build --release --bins
 
 # Check the environment
 ./target/release/game-opt-tool doctor
@@ -397,7 +397,7 @@ keep only if the tail improves and behavior is unchanged
 ## Tests
 
 ```bash
-~/.cargo/bin/cargo test
+cargo test
 ```
 
 Current suite: **194 tests passing, 1 ignored** (142 unit + 52 end-to-end
@@ -420,7 +420,7 @@ Run the real Ghidra test explicitly (it takes about 30 seconds):
 export JAVA_HOME="$HOME/.local/opt/jdk-25.0.5+8"
 export GHIDRA_INSTALL_DIR="$HOME/.local/opt/ghidra_12.2_PUBLIC"
 export GAME_OPT_TEST_BINARY="/path/to/your/game/DeusEx.exe"
-~/.cargo/bin/cargo test --test cli_decompile \
+cargo test --test cli_decompile \
   decompiles_a_real_binary_entry_point -- --ignored
 ```
 
@@ -456,4 +456,4 @@ distribution, single-player only. See [LEGAL.md](LEGAL.md).
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

@@ -432,7 +432,7 @@ mod tests {
     #[test]
     fn parses_a_maps_line_with_escaped_spaces() {
         let line = "10900000-10901000 r-xp 00000000 08:04 18391   \
-                    /path/to/your/game/DeusEx.exe";
+                    /path/to/your/game/Deus\\040Ex/System/DeusEx.exe";
         let entry = parse_maps_line(line).unwrap();
         assert_eq!(entry.start, 0x10900000);
         assert_eq!(entry.end, 0x10901000);
@@ -441,7 +441,7 @@ mod tests {
         assert_eq!(entry.inode, 18391);
         assert_eq!(
             entry.path.unwrap().to_string_lossy(),
-            "/path/to/your/game/DeusEx.exe"
+            "/path/to/your/game/Deus Ex/System/DeusEx.exe"
         );
     }
 

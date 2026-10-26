@@ -119,7 +119,7 @@ and point `JAVA_HOME` at it. Do not use `jre-openjdk`.
 On this machine `cargo` is not on `PATH`; call it explicitly:
 
 ```bash
-~/.cargo/bin/cargo build --release --bins
+cargo build --release --bins
 ```
 
 The binary is `target/release/game-opt-tool`.

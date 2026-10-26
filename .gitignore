@@ -1,43 +1,95 @@
-# Dependencies
-/targets/*/config/
-/targets/*/build/
-**/*.pyc
-**/__pycache__
-**/node_modules/
-**/vendor/
-
 # Build artifacts
 /target/
 /targets/*/target/
 /targets/*/out/
+/targets/*/config/
+/targets/*/build/
 **/*.exe
 **/*.dll
 **/*.so
 **/*.dylib
+**/*.o
+**/*.obj
+**/*.pdb
 
-# Local agent learning state (machine-specific)
+# Local tool output and scratch space
+/scratch/
+/tmp/
+/out/
+*.tmp
+*.temp
+
+# Game binaries and game data (never publish these)
+*.exe
+*.dll
+*.dat
+*.pak
+*.vpk
+*.u
+*.umap
+*.ucas
+*.utoc
+*.pak.json
+*.bin
+*.iso
+*.cue
+
+# Frame-time logs and captured metrics
+*.csv
+*.csv.*
+*.log
+logs/
+mangohud_*
+fps_*.txt
+
+# Patch artifacts and backups (machine-specific)
+*.patch.json
+*.bak
+*.bak.*
+*.backup
+*.orig
+*.rej
+
+# Ghidra projects and exports
+*.gpr
+*.rep
+*.ghidra/
+ghidra_projects/
+decompiled/
+exports/
+
+# Local agent learning state and session data
 /.vibe-wise/
+/.opencode/state/
+/.agents/
+.continue/
+.aider*
+.claude/
 
-# IDE
+# Dependencies and caches
+**/*.pyc
+**/__pycache__/
+**/node_modules/
+**/vendor/
+.cache/
+
+# IDE and editor state
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# OS
+# OS metadata
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Logs
-*.log
-logs/
-
-# Backup files
-*.bak
-*.backup
-
-# Secrets
+# Secrets and local environment
 .env
-.env.local
+.env.*
 **/.env
+**/.env.*
+*.pem
+*.key
+credentials.json
