@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.80"
 description = "Reverse engineer and optimize game binaries for better performance"
 license = "MIT"
-authors = ["Your Name Here"]
+authors = ["Game Opt Tool contributors"]
 
 [dependencies]
 # CLI

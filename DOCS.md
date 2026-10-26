@@ -148,10 +148,6 @@ game-opt-tool/
 │   └── config/            # Configuration management
 ├── config/                # Game configurations
 │   └── games.yaml         # Game configs and optimization passes
-├── .vibe-wise/            # Learning state (vibe-wise)
-│   ├── profile.md         # Learner profile
-│   ├── progress.md        # Learning progress
-│   └── project-map.md     # Project structure map
 ├── docs/                  # Documentation (this file)
 └── LEGAL.md               # Legal guidelines
 ```
@@ -195,67 +191,28 @@ games:
         preservation_required: true
 ```
 
-3. **Run optimization:**
-   ```bash
-   cargo run --release -- optimize --game /path/to/game.exe --output ./optimized
-   ```
+3. **Optimization status:** there is no automated pass pipeline yet. The
+   `optimize` subcommand is a stub that writes a byte-identical copy. Use
+   `sample` to find CPU hotspots, `decompile` to inspect one function,
+   `patch --spec` to apply a verified byte patch to a copy, and `compare` to
+   measure the result.
 
 ---
 
-## ⚙️ Optimization Passes
+## ⚙️ Optimization Passes (planned)
 
-| Pass | Description | Enabled |
-|------|-------------|---------|
-| loop_unrolling | Unroll loops to reduce branch overhead | ✅ |
-| simd_vectorization | Vectorize loops using SIMD instructions | ✅ |
-| cache_friendly_layout | Restructure data for better cache locality | ✅ |
-| constant_folding | Fold compile-time constants | ✅ |
-| dead_code_elimination | Remove unreachable code | ✅ |
-| function_inlining | Inline small functions | ✅ |
+The pass names below are configuration placeholders. None of them rewrite code
+yet; `optimize` does not apply them. Real changes currently require an explicit
+`patch --spec` with verified expected bytes.
 
-Each pass has configurable parameters in games.yaml.
-
----
-
-## 🔄 100% Optimization Gate
-
-The tool will continue optimizing until one of these conditions is met:
-
-### Stop Conditions (game is "100% optimized"):
-
-1. **Behavioral match = true** — Verification confirms frame-accurate equivalence
-2. **Performance gain ≥ threshold** — User-defined improvement threshold reached
-3. **User confirmation** — Manual override via `--confirm-optimized` flag
-
-### Iterative Loop
-
-The tool will automatically:
-1. Optimize → Patch → Verify
-2. If NOT 100% optimized: repeat with adjusted parameters
-3. If 100% optimized: stop and report final metrics
-
-### Example: Full Iterative Pipeline
-
-```bash
-# Run until 100% optimized (will loop automatically)
-cargo run --release -- run-pipeline \
-  --game /path/to/game.exe \
-  --until-optimized \
-  --max-iterations 10 \
-  --performance-threshold 15.0
-```
-
-**Output after completion:**
-```
-=== Optimization Complete ===
-Game: /path/to/game.exe
-Iterations: 3/10
-Final Performance Gain: +18.5%
-Behavioral Match: true
-Quirks Preserved: true
-Frame Difference: 0.03%
-Result: OPTIMAL — ready for use
-```
+| Pass | Intended effect | Implemented |
+|------|-----------------|-------------|
+| loop_unrolling | Reduce branch overhead | ❌ planned |
+| simd_vectorization | Vectorize hot loops | ❌ planned |
+| cache_friendly_layout | Improve data locality | ❌ planned |
+| constant_folding | Fold invariant expressions | ❌ planned |
+| dead_code_elimination | Remove unreachable code | ❌ planned |
+| function_inlining | Inline small functions | ❌ planned |
 
 ---
 
@@ -275,11 +232,14 @@ Result: OPTIMAL — ready for use
 ## ⚠️ Known Limitations
 
 1. **Ghidra required** for full decompilation
-2. **Java 21+** needed for Ghidra headless mode
-3. **Optimization passes** are partially implemented (skeleton/prototype)
-4. **Binary patching** works for trampoline jmp rel32 on x86
-5. **Frame time profiling** uses placeholder data until real profiling is integrated
-6. **Only Windows PE binaries** supported (32-bit and 64-bit)
+2. **JDK 25** is required by Ghidra 12.2 headless mode (a JRE is not enough)
+3. **Optimization passes** are not implemented; `optimize` is a stub
+4. **Binary patching** writes verified byte edits and code caves; it does not
+   rewrite program semantics for you
+5. **Frame-time profiling** reads real MangoHud CSV logs; there is no built-in
+   capture or GPU metric collection
+6. **Only Windows PE binaries** can be patched; ELF/Mach-O are detected and
+   decompiled but not patched
 
 ---
 
