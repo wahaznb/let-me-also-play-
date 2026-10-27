@@ -100,6 +100,38 @@ impl GameInfo {
             return Ok(arch);
         }
 
+        // Try Mach-O (macOS). This is host-independent: a Mach-O binary can be
+        // inspected on Linux or Windows too.
+        if let Ok(mach) = goblin::mach::Mach::parse(&data) {
+            let cputype = match &mach {
+                goblin::mach::Mach::Binary(macho) => Some(macho.header.cputype),
+                goblin::mach::Mach::Fat(fat) => fat
+                    .arches()
+                    .ok()
+                    .and_then(|arches| arches.first().map(|arch| arch.cputype())),
+            };
+            let arch = match cputype {
+                Some(goblin::mach::cputype::CPU_TYPE_X86) => (BinaryFormat::MachO, Architecture::X86),
+                Some(goblin::mach::cputype::CPU_TYPE_X86_64) => {
+                    (BinaryFormat::MachO, Architecture::X64)
+                }
+                Some(goblin::mach::cputype::CPU_TYPE_ARM) => {
+                    (BinaryFormat::MachO, Architecture::ARM)
+                }
+                Some(goblin::mach::cputype::CPU_TYPE_ARM64) => {
+                    (BinaryFormat::MachO, Architecture::ARM64)
+                }
+                Some(goblin::mach::cputype::CPU_TYPE_MIPS) => {
+                    (BinaryFormat::MachO, Architecture::MIPS)
+                }
+                Some(goblin::mach::cputype::CPU_TYPE_POWERPC) => {
+                    (BinaryFormat::MachO, Architecture::PowerPC)
+                }
+                _ => (BinaryFormat::MachO, Architecture::Unknown),
+            };
+            return Ok(arch);
+        }
+
         warn!("Unknown binary format");
         Ok((BinaryFormat::Unknown, Architecture::Unknown))
     }
@@ -180,6 +212,31 @@ mod tests {
         assert_eq!(architecture, Architecture::X86);
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
         assert_eq!(architecture, Architecture::ARM64);
+        #[cfg(target_os = "macos")]
+        assert!(
+            matches!(architecture, Architecture::X64 | Architecture::ARM64),
+            "unexpected macOS architecture: {architecture:?}"
+        );
+    }
+
+    #[test]
+    fn detects_thin_macho_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("thin-macho");
+        let mut data = Vec::new();
+        data.extend_from_slice(&0xFEED_FACFu32.to_le_bytes()); // MH_MAGIC_64
+        data.extend_from_slice(&0x0100_0007u32.to_le_bytes()); // CPU_TYPE_X86_64
+        data.extend_from_slice(&3u32.to_le_bytes()); // CPU_SUBTYPE_X86_64_ALL
+        data.extend_from_slice(&2u32.to_le_bytes()); // MH_EXECUTE
+        data.extend_from_slice(&0u32.to_le_bytes()); // ncmds
+        data.extend_from_slice(&0u32.to_le_bytes()); // sizeofcmds
+        data.extend_from_slice(&0u32.to_le_bytes()); // flags
+        data.extend_from_slice(&0u32.to_le_bytes()); // reserved
+        std::fs::write(&path, data).unwrap();
+
+        let (format, architecture) = GameInfo::detect_format(&path).unwrap();
+        assert_eq!(format, BinaryFormat::MachO);
+        assert_eq!(architecture, Architecture::X64);
     }
 
     #[test]
