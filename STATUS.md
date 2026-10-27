@@ -191,8 +191,8 @@ Backup check against `/path/to/your/game/DeusEx.exe`
 | Feature | Implementation |
 |---------|----------------|
 | PE detection | `MZ` header + `PE\0\0` signature at `e_lfanew` |
-| ELF / Mach-O detection | Magic bytes, both Mach-O endiannesses |
-| Architecture detection | goblin PE/ELF machine types |
+| ELF / Mach-O detection | Goblin parsing plus fat-slice validation; magic fallback for byte-swapped fat headers; both Mach-O endiannesses |
+| Architecture detection | goblin PE/ELF machine types and Mach-O CPU types; universal binaries prefer the host slice on macOS |
 | Config | `config/games.yaml` parsed as a full `Config`; fuzzy game-name lookup |
 | Backup | Content-addressed `.bak` + `.bak.json` manifest, `create_new`, SHA-256 |
 | Revert | Checksum verification, symlink refusal, atomic temp+rename, read-back verification, permission preservation, dry-run |
