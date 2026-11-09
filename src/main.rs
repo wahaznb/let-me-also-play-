@@ -204,7 +204,7 @@ enum Command {
     /// Static reverse-engineering analysis: find safe, length-preserving
     /// optimization candidates and (optionally) patch them. No measurement.
     Rea {
-        /// Path to the game executable
+        /// Path to the game executable (the patched copy with --revert)
         #[arg(short, long)]
         game: std::path::PathBuf,
 
@@ -523,7 +523,7 @@ async fn rea_command(
         let manifest_path = manifest.ok_or_else(|| {
             anyhow::anyhow!("--revert requires --manifest <patch-manifest.json>")
         })?;
-        let report = Patcher::unpatch(manifest_path, output, false)?;
+        let report = Patcher::unpatch(manifest_path, Some(game), false)?;
         if json {
             println!("{}", serde_json::to_string_pretty(&report)?);
             return Ok(());

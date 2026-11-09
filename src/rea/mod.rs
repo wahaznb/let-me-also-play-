@@ -136,7 +136,7 @@ pub fn analyze(
         let insns = decode::linear_sweep(slice, va, bitness, limit);
         let instructions = insns.iter().filter(|i| i.valid).count();
         let data_skips = insns.iter().filter(|i| !i.valid).count();
-        let cands = candidates::find_candidates(&insns);
+        let cands = candidates::find_candidates(&insns, bitness);
         let n = cands.len();
         all_candidates.extend(cands);
         report.sections_scanned.push(ScannedSection {
