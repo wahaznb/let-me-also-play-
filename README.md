@@ -1,9 +1,10 @@
 # Game Opt Tool
 
-> A work-in-progress tool for inspecting game binaries, measuring frame-time
-> consistency, and safely trying performance changes. The measurement,
-> backup/revert, and single-function Ghidra decompilation layers are real and
-> tested; optimization and binary rewriting are still prototypes.
+> A work-in-progress tool for inspecting game binaries, statically finding safe
+> code changes, and safely trying them. The static REA analyzer, backup/revert,
+> byte patcher, and single-function Ghidra decompilation layers are real and
+> tested; measurement is optional, and the old optimizer passes are still
+> prototypes.
 
 ## Current status (verified by `cargo test`)
 
@@ -14,7 +15,8 @@
 | `doctor` prerequisite checks | **Working** |
 | Backup with SHA-256 + JSON manifest | **Working, tested** |
 | Revert with checksum verification and atomic write | **Working, tested** |
-| Frame-time profiling from MangoHud CSV | **Working, tested against a real MangoHud log** |
+| Static REA analysis (`rea`) | **Working, tested** — PE + x86/x64 linear sweep, guarded length-preserving candidates, JSON reports, reversible apply |
+| Frame-time profiling from MangoHud CSV | **Working, tested against a real MangoHud log** — optional, not used by REA |
 | A/B log comparison | **Working, tested** — deltas for average FPS, 1%/0.1% lows, p99, and stutter |
 | `analyze` | Detection plus real frame-time summary when a log is available |
 | Per-function CPU sampling (`sample`) | **Working on Linux** — real `perf_event_open` self-CPU samples, per-thread, no `sudo`; Linux-only and blind to GPU/blocked time |
@@ -91,6 +93,21 @@ cp "/path/to/your/game/DeusEx.exe" /tmp/DeusEx.exe
 ./target/release/game-opt-tool revert --game /tmp/DeusEx.exe --dry-run
 ./target/release/game-opt-tool revert --game /tmp/DeusEx.exe
 
+# Static analysis: find safe, length-preserving candidates (no measurement)
+./target/release/game-opt-tool rea --game "/path/to/your/game/DeusEx.exe"
+./target/release/game-opt-tool rea --game "/path/to/your/game/DeusEx.exe" --spec-only
+
+# Apply to a copy and keep the reversible manifest
+./target/release/game-opt-tool rea \
+  --game "/path/to/your/game/DeusEx.exe" \
+  --output /tmp/DeusEx-patched.exe \
+  --manifest /tmp/DeusEx.rea.json
+
+# Revert that copy exactly
+./target/release/game-opt-tool rea \
+  --game /tmp/DeusEx-patched.exe \
+  --revert --manifest /tmp/DeusEx.rea.json
+
 # Inspect a real game executable
 ./target/release/game-opt-tool analyze --game "/path/to/your/game/DeusEx.exe"
 
@@ -106,6 +123,42 @@ cp "/path/to/your/game/DeusEx.exe" /tmp/DeusEx.exe
   --game "/path/to/your/game/DeusEx.exe" \
   --duration 20 --top 20
 ```
+
+## Static analysis without measurement
+
+`rea` is the no-measurement path. It decodes executable PE sections with
+`iced-x86`, flags changes that are provably behavior-preserving, and writes a
+patch spec guarded by the bytes it found. It never launches the game, reads a
+MangoHud log, or claims a frame-time win.
+
+```bash
+# Analysis only (human-readable, or --json for agents)
+game-opt-tool rea --game <exe>
+game-opt-tool rea --game <exe> --json
+
+# Print the spec without applying it
+game-opt-tool rea --game <exe> --spec-only
+
+# Apply to a copy, then revert exactly from the manifest
+game-opt-tool rea --game <exe> --output <copy> --manifest <manifest.json>
+game-opt-tool rea --game <copy> --revert --manifest <manifest.json>
+```
+
+Candidate classes:
+
+| Class | Kinds | Meaning |
+|-------|-------|---------|
+| `dead_code` | `dead_move`, `dead_jump` | Removes a no-op instruction |
+
+REA deliberately does not rewrite `test reg,reg` or `and reg,reg` into `xor`:
+that would zero the register and change its flags. Only dead code is emitted.
+
+Every replacement is the same length as the original bytes, so no following
+instruction moves. The verified Patcher still owns the write: it checks the
+expected-byte guard, refuses signed PE binaries by default, writes atomically,
+and records a SHA-256 manifest. The sweep is linear, so a candidate inside
+embedded data is a false positive; review addresses before applying. See
+[docs/rea.md](docs/rea.md) for the full contract and limitations.
 
 ## Decompile a function
 
@@ -260,6 +313,7 @@ the one used for optimization comparisons.
 | `sample --game <path> [--pid N\|--process NAME] [--duration N] [--frequency N] [--top N] [--no-ghidra] [--refresh-functions] [--json]` | Samples self CPU time per thread and resolves hot addresses through a cached Ghidra function map (Linux only) |
 | `compare --baseline <csv> --patched <csv> [--frames N] [--json]` | Compares two measured runs and reports per-metric deltas with interpretation notes |
 | `decompile --game <path> [--address <hex>] [--assembly] [--json]` | Decompiles one function with Ghidra; defaults to the executable entry point |
+| `rea --game <path> [--max-bytes N] [--spec-only] [--output <file>] [--manifest <json>] [--revert] [--json]` | Static iced-x86 sweep for safe, length-preserving candidates; emits a guarded spec and optionally patches a copy with a reversible manifest. No measurement |
 | `optimize --game <path> --output <dir>` | Stub: writes a copy with placeholder speedups; not a working optimizer |
 | `patch --game <path> --output <file> [--spec <json>] [--manifest <json>] [--dry-run] [--json]` | Writes a byte-identical copy unless `--spec` is supplied; `--spec` applies bounds-checked byte patches and optional code caves, writes a manifest, and `unpatch` rolls back exactly |
 | `unpatch --manifest <json>` | Restores exactly the bytes recorded in a patch manifest |
@@ -371,6 +425,11 @@ Running game → perf_event_open (per thread) → IP → /proc maps → PE RVA
                               ▼
                     Ghidra function map (cached) → self CPU by function
 
+PE executable → linear iced-x86 sweep → safe candidates (length-preserving)
+                                      │
+                                      ▼
+                       guarded patch spec → verified Patcher → manifest
+
 PE/ELF/Mach-O → entry point or --address → Ghidra headless → pseudocode + disassembly
 
 AI agent (OpenCode / Claude Code / MCP client)
@@ -400,7 +459,7 @@ keep only if the tail improves and behavior is unchanged
 cargo test
 ```
 
-Current suite: **194 tests passing, 1 ignored** (142 unit + 52 end-to-end
+Current suite: **217 tests passing, 1 ignored** (161 unit + 56 end-to-end
 CLI/MCP tests, plus one ignored real-Ghidra test). They cover SHA-256 NIST
 vectors, backup/restore round-trips, tampered and truncated backups, symlink
 refusal, permission preservation, PE/ELF/Mach-O magic detection, PE `MZ`

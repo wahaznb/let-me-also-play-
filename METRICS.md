@@ -1,5 +1,10 @@
 # Performance metrics that actually matter
 
+> **Optional:** the static `rea` workflow does not use any metric in this
+> document. REA finds provably safe byte changes and never claims a measured
+> speedup. Use these metrics only when you choose to profile a build yourself.
+> See [docs/rea.md](docs/rea.md) for the no-measurement path.
+
 This document is the measurement policy for `game-opt-tool`. It answers three
 questions:
 

@@ -19,8 +19,8 @@ prove.
 - Never patch the original binary. Always write to a separate `--output` copy.
 - REA does not run the game and does not measure FPS, frame times, or CPU.
   Never claim a speedup, a latency win, or a frame-time improvement.
-- Dead-code candidates remove work. Normalization candidates only rewrite an
-  idiom; they are not a measured win. Say which class each candidate is in.
+- Dead-code candidates remove work. REA does not rewrite flag-sensitive idioms
+  such as `test reg,reg`; only provably dead code is emitted.
 - Every applied change must have a manifest. No manifest, no patch.
 - Stop at every gate and wait for my explicit approval before continuing.
 
@@ -47,10 +47,11 @@ Stop and wait.
 
 1. Group candidates by class:
    - `dead_code` — `dead_move`, `dead_jump`
-   - `normalization` — `test_self`, `and_self`
-2. Explain in plain language what each class changes. Do not paste the full
+2. Explain in plain language what each candidate changes. Do not paste the full
    candidate list if it is long; show the first 10 and the counts.
 3. State explicitly: "No speedup is claimed. This is a static change list."
+   Also state that the sweep is linear, so a candidate inside embedded data is
+   a false positive and addresses should be reviewed before applying.
 4. Ask me whether to generate a spec, apply to a copy, or stop.
 
 Stop and wait.

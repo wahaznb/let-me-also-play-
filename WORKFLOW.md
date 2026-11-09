@@ -1,5 +1,11 @@
 # Guided optimization: who does what
 
+> **No-measurement path:** for the static `rea` workflow (scan → review
+> candidates → apply to a copy → manifest), read [docs/rea.md](docs/rea.md) and
+> the `/optimize-game` command in `.opencode/commands/`. REA never launches the
+> game and never claims a measured speedup. The measurement workflow below is
+> optional and still available for targeted profiling.
+
 This is the honest workflow. **You** own the game and the decision. **The AI**
 reasons about decompiled code and proposes one patch at a time. **The tool**
 does the deterministic, reversible work: hashing, backups, Ghidra, real CPU
