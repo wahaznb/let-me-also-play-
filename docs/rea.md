@@ -37,7 +37,7 @@ game-opt-tool rea --game <path.exe> --revert --manifest <manifest.json>
 ```
 === REA: static analysis ===
 Game:       Mortal Shell
-Executable: /home/wz/Games/.../Dungeonhaven-Win64-Shipping.exe
+Executable: /games/Mortal Shell/Dungeonhaven-Win64-Shipping.exe
 Format:     PE
 Arch:       x64
 
