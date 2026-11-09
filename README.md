@@ -1,12 +1,308 @@
 # Game Opt Tool
 
-> A work-in-progress tool for inspecting game binaries, statically finding safe
-> code changes, and safely trying them. The static REA analyzer, backup/revert,
-> byte patcher, and single-function Ghidra decompilation layers are real and
-> tested; measurement is optional, and the old optimizer passes are still
-> prototypes.
+Game Opt Tool is a local command-line tool for one narrow job:
 
-## Current status (verified by `cargo test`)
+> Take a game executable you own, find a few instruction-level changes that can
+> be made safely **without running or measuring the game**, apply them to a
+> copy, and keep a manifest that can undo every byte.
+
+It is a reverse-engineering **candidate finder**, not an FPS booster. The static
+analyzer (REA) only removes demonstrably dead instructions from PE x86/x86-64
+binaries. It never launches the game, reads a MangoHud log, or claims a speedup.
+
+If you only read one section, read [The loop](#the-loop-in-six-steps) and
+[What "safe" means](#what-safe-means-and-what-it-does-not-mean).
+
+---
+
+## The loop in six steps
+
+### 1. Identify the binary
+
+You point the tool at a game executable. It detects the container format
+(PE/ELF/Mach-O) and the architecture. REA also hashes the exact file so the
+patch spec is tied to that build. REA currently accepts **PE, x86 or x86-64**
+only.
+
+```text
+your game .exe
+      │
+      ▼
+format + architecture + exact-file SHA-256
+```
+
+### 2. Scan the executable sections
+
+`rea` decodes the executable sections with `iced-x86`, one instruction at a
+time. It is a linear sweep: it does not build a control-flow graph, and it does
+not know which bytes are code versus embedded data.
+
+```text
+PE executable sections
+      │  iced-x86 linear sweep
+      ▼
+instruction stream + data-skips
+```
+
+### 3. Propose only provably dead instructions
+
+The current catalog is deliberately small:
+
+| Candidate | What was found | Replacement |
+|-----------|----------------|-------------|
+| `dead_move` | A self-move that cannot change the register, e.g. `mov rax, rax` | Same-length NOP |
+| `dead_jump` | A near `jmp` whose target is the immediately following instruction | Same-length NOP |
+
+Every replacement is **exactly the same length** as the original bytes, so no
+following instruction moves and no relocation is needed.
+
+Some things are deliberately *not* rewritten:
+
+- `test reg, reg` and `and reg, reg` are **not** turned into `xor`. That would
+  zero the register and change flags, so it is not behavior-preserving.
+- `mov eax, eax` in 64-bit mode is **not** treated as dead. A 32-bit write
+  zeroes the upper 32 bits of `RAX`, so removing it can change the register's
+  value.
+
+### 4. Turn the candidates into a guarded patch spec
+
+Each candidate becomes one entry in a JSON `PatchSpec`:
+
+```json
+{
+  "schema_version": 1,
+  "name": "rea-your-game",
+  "target_sha256": "<hash of the exact input file>",
+  "allow_signed": false,
+  "patches": [
+    {
+      "address": "0x140001000",
+      "expected": "4889c0",
+      "replace": "0f1f00",
+      "note": "[rea:dead_move ...]"
+    }
+  ],
+  "sections": []
+}
+```
+
+The `expected` bytes are a version guard: if the binary is not the one that was
+scanned, the patch refuses to apply. The Patcher independently re-checks the
+address, the PE section, the expected bytes, and the target SHA-256.
+
+### 5. Apply to a copy and back up anything you overwrite
+
+The recommended command writes to a **separate output path**. The original game
+executable is then untouched.
+
+```text
+original .exe ──────────────► unchanged
+      │
+      └── scan ──► spec ──► Patcher ──► patched copy
+                                      + manifest
+```
+
+If the output path already exists, it is backed up first with a SHA-256 record.
+Writes use a temporary file, `fsync`, and rename, so a crash cannot leave a
+half-written executable. Signed PE binaries are refused by default because
+patching would invalidate the signature.
+
+### 6. Record and revert
+
+The manifest records, for every change:
+
+- the virtual address and file offset;
+- the original bytes and the replacement bytes;
+- the input and output SHA-256;
+- the PE metadata needed to recognise the patched file.
+
+Revert verifies the patched file's SHA-256 and the recorded bytes before it
+changes anything. If the file was modified after patching, revert refuses
+instead of forcing a restore.
+
+```text
+manifest ──► verify patched file ──► restore original bytes ──► verify result
+```
+
+---
+
+## How your intent maps to the implementation
+
+| What you asked for | What the tool actually does | Where it lives |
+|---|---|---|
+| "I don't want it to measure anything." | REA never launches the game, never reads MangoHud, and never samples CPU. `profile`, `sample`, and `compare` are separate, optional commands. | `src/rea/` |
+| "Analyze the game and find a safe improvement." | Linear `iced-x86` sweep of executable PE sections, restricted to dead code. | `src/rea/decode.rs`, `src/rea/candidates.rs` |
+| "Produce a patch." | Emits a JSON `PatchSpec` with expected bytes and replacement bytes. | `src/rea/patch.rs` |
+| "Back up before applying." | Applying to a copy preserves the original. If the output copy already exists, it is backed up first. The manifest is the change record. | `src/backup/`, `src/patcher/` |
+| "Apply it." | The verified Patcher re-checks everything and writes atomically. | `src/patcher/mod.rs` |
+| "Track every change." | A JSON manifest records bytes, offsets, hashes, and PE metadata. | `src/patcher/mod.rs` |
+| "Let me undo it." | `rea --revert --manifest ...` verifies and restores exactly. | `src/main.rs`, `src/patcher/mod.rs` |
+| "Don't claim a speedup you didn't measure." | The REA path makes no performance claim. Removing dead code is a cleanup, not a proven FPS win. | `docs/rea.md` |
+
+---
+
+## What "safe" means, and what it does not mean
+
+**Safe here means:** the replacement is provably equivalent at the instruction
+level for the emitted candidate classes, is the same byte length, and is
+guarded by the exact bytes that were scanned.
+
+**Safe does not mean:**
+
+- that the game will behave identically at runtime — REA does not run it;
+- that the candidate is definitely code and not embedded data — the sweep is
+  linear, so a candidate inside data is a false positive;
+- that the change improves FPS, frame time, stutter, or latency — nothing is
+  measured;
+- that the binary is compatible with a different game build or patch version.
+
+The expected-byte guard protects against a **different build**. It cannot
+protect against a **false positive in the same build**. Review the reported
+addresses before applying a patch to a game you care about.
+
+---
+
+## Quick start
+
+```bash
+# Build
+cargo build --release --bins
+
+# Check the environment (no game required)
+./target/release/game-opt-tool doctor
+
+# Work on a copy while testing
+cp "/path/to/your/game/Game.exe" /tmp/Game.exe
+
+# 1. Scan only. Nothing is written.
+./target/release/game-opt-tool rea --game /tmp/Game.exe
+
+# 2. Machine-readable report for scripts or agents
+./target/release/game-opt-tool rea --game /tmp/Game.exe --json
+
+# 3. Inspect the generated patch spec without applying it
+./target/release/game-opt-tool rea --game /tmp/Game.exe --spec-only
+
+# 4. Apply to a separate copy and write a named manifest
+./target/release/game-opt-tool rea \
+  --game /tmp/Game.exe \
+  --output /tmp/Game-patched.exe \
+  --manifest /tmp/Game.rea.json
+
+# 5. Revert that copy exactly
+./target/release/game-opt-tool rea \
+  --game /tmp/Game-patched.exe \
+  --revert --manifest /tmp/Game.rea.json
+```
+
+Optional backup commands for a file you intend to overwrite directly:
+
+```bash
+./target/release/game-opt-tool backup --game /tmp/Game.exe
+./target/release/game-opt-tool backup --game /tmp/Game.exe --list
+./target/release/game-opt-tool backup --game /tmp/Game.exe --verify
+./target/release/game-opt-tool revert --game /tmp/Game.exe --dry-run
+./target/release/game-opt-tool revert --game /tmp/Game.exe
+```
+
+---
+
+## Commands
+
+| Command | What it does today |
+|---------|--------------------|
+| `rea --game <path> [--json] [--spec-only] [--output <file>] [--manifest <json>] [--revert]` | **Primary workflow.** Static scan for safe dead-code candidates; optional guarded patch to a copy and exact revert. No measurement. |
+| `unpatch --manifest <json> [--game <file>] [--dry-run]` | Reverts the exact byte changes recorded in a patch manifest. |
+| `backup --game <file> [--list] [--verify]` | Creates, lists, or verifies SHA-256 backups. |
+| `revert --game <file> [--backup <manifest>] [--dry-run]` | Restores the newest or a specific verified backup. |
+| `doctor [--game <path>]` | Checks config, tools, binary, backup directory, and the sampling probe. |
+| `analyze --game <path> [--log <csv>] [--log-dir <dir>]` | Detects format/architecture; adds measured statistics only if you give it a log. |
+| `decompile --game <path> [--address <hex>] [--assembly] [--json]` | Decompiles one function with Ghidra; defaults to the entry point. |
+| `patch --game <path> --output <file> [--spec <json>] [--manifest <json>] [--dry-run] [--json]` | Applies a hand-written spec, or writes a byte-identical copy when no spec is supplied. |
+| `verify --original <a> --patched <b>` | Compares bytes only; runtime equivalence is not implemented. |
+| `profile --game <path> [--log <csv>] [--log-dir <dir>] [--frames N] [--json]` | Optional MangoHud frame-time statistics. Not part of REA. |
+| `compare --baseline <csv> --patched <csv> [--frames N] [--json]` | Optional A/B comparison of two measured runs. |
+| `sample --game <path> [--pid N\|--process NAME] [--duration N] [--frequency N] [--top N] [--no-ghidra] [--refresh-functions] [--json]` | Optional Linux per-function self-CPU sampling of a running game. |
+| `optimize --game <path> --output <dir>` | **Stub.** Writes a copy with placeholder speedups; not a working optimizer. |
+| `mcp-server [--transport stdio\|http] [--port P]` | Exposes the tools to AI agents over MCP. |
+| `list-games`, `help <game>` | Lists configured targets / shows target notes. |
+
+---
+
+## Safety model
+
+- **Original stays intact** when you use a separate `--output` copy.
+- **Existing output is backed up** before it is overwritten.
+- **Expected-byte guard** — every patch must match the bytes that were scanned.
+- **Target SHA-256** — the spec records the exact input file hash.
+- **Signed PE refusal** — Authenticode-signed binaries are rejected by default.
+- **No symlinks or special files** as patch, backup, or restore targets.
+- **Atomic writes** — temp file + `fsync` + rename.
+- **Manifest** — every byte change, offset, and hash is recorded.
+- **Verified revert** — the patched file's hash and bytes are checked before
+  restoring anything.
+- **No network, no telemetry, no elevated privileges.**
+
+---
+
+## Why do I still see `.gitignore` and `.opencode`?
+
+A leading dot is only a Unix naming convention. `ls` hides dotfiles by default;
+`ls -a` shows them. Git does not hide files based on the dot.
+
+- **`.gitignore` is tracked on purpose.** It contains the ignore rules that the
+  repository needs. Git cannot ignore itself, and adding `.gitignore` to
+  `.gitignore` would not remove it from the repository.
+- **`.opencode/commands/optimize-game.md` is tracked on purpose.** It is the
+  `/optimize-game` workflow that ships with the repository.
+- **`.opencode/state/` is ignored.** That is local session state, not source.
+- **`.vibe-wise/`, `.court/`, `target/`, and game files are ignored.** They are
+  local or machine-specific and are not published.
+
+If you want the OpenCode command to stay private instead of shipping it:
+
+```bash
+# Remove it from git, keep it on disk, and ignore it locally.
+git rm -r --cached .opencode
+printf '\n/.opencode/\n' >> .gitignore
+git commit -m "chore: stop tracking local OpenCode commands"
+```
+
+If you only want a local ignore rule without changing the shared `.gitignore`,
+put the pattern in `.git/info/exclude` instead.
+
+---
+
+## Optional: measurement and profiling
+
+These commands exist and are tested, but they are **not used by REA** and are
+not required for the safe-patch loop:
+
+```bash
+# Frame-time statistics from a MangoHud CSV you captured yourself
+./target/release/game-opt-tool profile \
+  --game "/path/to/your/game/Game.exe" \
+  --log-dir /tmp/mangohud
+
+# Compare two measured runs
+./target/release/game-opt-tool compare \
+  --baseline /tmp/mangohud/before.csv \
+  --patched /tmp/mangohud/after.csv
+
+# Sample self CPU time per function while the game is running (Linux only)
+./target/release/game-opt-tool sample \
+  --game "/path/to/your/game/Game.exe" \
+  --duration 20 --top 20
+```
+
+Read [METRICS.md](METRICS.md) before treating a metric as a verdict, and
+[WORKFLOW.md](WORKFLOW.md) for the optional measurement workflow. The sampler
+sees self CPU time only; it is blind to GPU time, blocked time, and kernel time.
+A hot function is still only a hypothesis, not a proven frame-time win.
+
+---
+
+## Status
 
 | Area | Status |
 |------|--------|
@@ -16,324 +312,99 @@
 | Backup with SHA-256 + JSON manifest | **Working, tested** |
 | Revert with checksum verification and atomic write | **Working, tested** |
 | Static REA analysis (`rea`) | **Working, tested** — PE + x86/x64 linear sweep, guarded length-preserving candidates, JSON reports, reversible apply |
-| Frame-time profiling from MangoHud CSV | **Working, tested against a real MangoHud log** — optional, not used by REA |
-| A/B log comparison | **Working, tested** — deltas for average FPS, 1%/0.1% lows, p99, and stutter |
-| `analyze` | Detection plus real frame-time summary when a log is available |
-| Per-function CPU sampling (`sample`) | **Working on Linux** — real `perf_event_open` self-CPU samples, per-thread, no `sudo`; Linux-only and blind to GPU/blocked time |
-| Verify | **Byte comparison only** — runtime equivalence is not implemented |
+| Frame-time profiling from MangoHud CSV | **Working, tested** — optional, not used by REA |
+| A/B log comparison | **Working, tested** — optional, not used by REA |
+| Per-function CPU sampling (`sample`) | **Working on Linux** — real `perf_event_open` self-CPU samples, no `sudo`; blind to GPU/blocked time |
 | Decompilation | **Working for one function at a time** — real Ghidra headless output; needs Ghidra 12.2 + JDK 25 |
+| Verify | **Byte comparison only** — runtime equivalence is not implemented |
 | Optimizer passes | **Stubs** — placeholder speedup values |
-| PE byte patches / code caves | **Working for PE** — `--spec` applies bounds-checked byte patches and optional appended executable sections; JSON manifest enables exact rollback via `unpatch`. Copy mode still writes a byte-identical copy. |
-| MCP server for AI agents | **Working, tested** — stdio and HTTP transports; eleven tools wired to the real sampler, decompiler, profiler, patcher, backup, and verifier; responses are size-capped and decompilation is paginated |
+| PE byte patches / code caves | **Working for PE** — bounds-checked patches, optional appended executable sections, exact rollback |
+| MCP server for AI agents | **Working, tested** — stdio and HTTP; bounded and paginated responses |
 
-The tool does not fabricate frame-time measurements: when no log is available,
-`profile` fails with instructions and `analyze` explains how to generate one.
-Decompilation is real Ghidra output, not generated pseudocode. Optimizer
-speedups are still labelled as placeholders, and `verify` never reports a
-changed binary as safe.
+There are **no measured speedups** for any game yet. The tool does not fabricate
+frame-time numbers: `profile` fails with instructions when no log is available,
+and `verify` never reports a changed binary as runtime-safe.
 
-## Safety model
+---
 
-- A backup is created automatically before `patch` overwrites an existing file.
-- Every backup records the original SHA-256 in a JSON manifest.
-- Restores verify the backup *before* touching the target, then read the target
-  back and verify it again.
-- Patches refuse to write their manifest over the input or output binary, and
-  refuse spec/output/manifest path aliases. They also refuse symlinks and
-  non-regular files.
-- Writes use a temp file + fsync + rename, so a crash cannot leave a truncated
-  executable.
-- Symlinks are refused as backup/restore and patch targets.
-- `--dry-run` previews a restore or patch without writing.
-- Backups live next to the original file; there is no hidden database.
-- No network access, no telemetry, no elevated privileges.
+## Supported games
 
-## Prerequisites
+| Game | Status |
+|------|--------|
+| **Deus Ex (2000)** | Test target: PE32/x86 detection, backup/revert, and Ghidra decompilation of entry point `0x109214B6` verified against the real executable |
+| Oblivion Remastered, Skyrim SE, Jedi: Survivor | Config entries only; no target-specific work |
 
-See [PREREQUISITES.md](PREREQUISITES.md). Short version: Rust 1.80+ to build,
-write access to the game executable's directory, and no root.
+REA is not limited to these games. It scans any PE x86/x86-64 executable whose
+license and ownership allow you to modify a local copy.
 
-Frame-time measurement additionally needs **MangoHud** and, for Windows games,
-**Wine**:
+---
 
-```bash
-./target/release/game-opt-tool doctor --game "/path/to/DeusEx.exe"
+## How it works today
+
+```text
+Path → format/arch detection → config lookup → command
+                                      │
+                    ┌─────────────────┼──────────────────┐
+                    ▼                 ▼                  ▼
+                backup/revert     doctor            verify (bytes)
+              SHA-256 + atomic
+
+PE executable → linear iced-x86 sweep → safe candidates (length-preserving)
+                                      │
+                                      ▼
+                       guarded patch spec → verified Patcher → manifest
+                                                                  │
+                                                                  ▼
+                                                               revert
+
+MangoHud CSV → frame times → avg / lows / percentiles / stutter
+                                      │
+                                      ▼
+                             optional A/B compare
+
+Running game → perf_event_open (per thread) → IP → /proc maps → PE RVA
+                          │
+                          ▼
+                Ghidra function map (cached) → self CPU by function
+
+PE/ELF/Mach-O → entry point or --address → Ghidra headless → pseudocode
 ```
 
-Per-function CPU sampling needs **Linux** with `perf_event_open` allowed for
-the current user. It is tested at `perf_event_paranoid=2` and needs no `sudo`
-and no `perf` binary. Sampling is not implemented on Windows or macOS.
+The `optimize` command is still a stub. It is not part of the REA loop.
 
-Decompilation additionally needs **Ghidra 12.2** and a full **JDK 25**. Ghidra
-12.2 rejects JDK 21 and JRE-only installations. The verified local install is:
+---
 
-```bash
-export GHIDRA_INSTALL_DIR="$HOME/.local/opt/ghidra_12.2_PUBLIC"
-export JAVA_HOME="$HOME/.local/opt/jdk-25.0.5+8"
-```
-
-See [PREREQUISITES.md](PREREQUISITES.md) for the current portable setup.
-
-## Quick start
-
-```bash
-# Build
-cargo build --release --bins
-
-# Check the environment
-./target/release/game-opt-tool doctor
-
-# Work on a copy while testing
-cp "/path/to/your/game/DeusEx.exe" /tmp/DeusEx.exe
-
-# Back up, inspect, and restore
-./target/release/game-opt-tool backup --game /tmp/DeusEx.exe
-./target/release/game-opt-tool backup --game /tmp/DeusEx.exe --list
-./target/release/game-opt-tool backup --game /tmp/DeusEx.exe --verify
-./target/release/game-opt-tool revert --game /tmp/DeusEx.exe --dry-run
-./target/release/game-opt-tool revert --game /tmp/DeusEx.exe
-
-# Static analysis: find safe, length-preserving candidates (no measurement)
-./target/release/game-opt-tool rea --game "/path/to/your/game/DeusEx.exe"
-./target/release/game-opt-tool rea --game "/path/to/your/game/DeusEx.exe" --spec-only
-
-# Apply to a copy and keep the reversible manifest
-./target/release/game-opt-tool rea \
-  --game "/path/to/your/game/DeusEx.exe" \
-  --output /tmp/DeusEx-patched.exe \
-  --manifest /tmp/DeusEx.rea.json
-
-# Revert that copy exactly
-./target/release/game-opt-tool rea \
-  --game /tmp/DeusEx-patched.exe \
-  --revert --manifest /tmp/DeusEx.rea.json
-
-# Inspect a real game executable
-./target/release/game-opt-tool analyze --game "/path/to/your/game/DeusEx.exe"
-
-# Compare an original and a copy
-./target/release/game-opt-tool verify --original /tmp/DeusEx.exe --patched /tmp/DeusEx-patched.exe
-
-# Decompile the executable's entry point with Ghidra
-./target/release/game-opt-tool decompile \
-  --game "/path/to/your/game/DeusEx.exe"
-
-# Sample CPU time per function while the game is running
-./target/release/game-opt-tool sample \
-  --game "/path/to/your/game/DeusEx.exe" \
-  --duration 20 --top 20
-```
-
-## Static analysis without measurement
-
-`rea` is the no-measurement path. It decodes executable PE sections with
-`iced-x86`, flags changes that are provably behavior-preserving, and writes a
-patch spec guarded by the bytes it found. It never launches the game, reads a
-MangoHud log, or claims a frame-time win.
-
-```bash
-# Analysis only (human-readable, or --json for agents)
-game-opt-tool rea --game <exe>
-game-opt-tool rea --game <exe> --json
-
-# Print the spec without applying it
-game-opt-tool rea --game <exe> --spec-only
-
-# Apply to a copy, then revert exactly from the manifest
-game-opt-tool rea --game <exe> --output <copy> --manifest <manifest.json>
-game-opt-tool rea --game <copy> --revert --manifest <manifest.json>
-```
-
-Candidate classes:
-
-| Class | Kinds | Meaning |
-|-------|-------|---------|
-| `dead_code` | `dead_move`, `dead_jump` | Removes a no-op instruction |
-
-REA deliberately does not rewrite `test reg,reg` or `and reg,reg` into `xor`:
-that would zero the register and change its flags. Only dead code is emitted.
-
-Every replacement is the same length as the original bytes, so no following
-instruction moves. The verified Patcher still owns the write: it checks the
-expected-byte guard, refuses signed PE binaries by default, writes atomically,
-and records a SHA-256 manifest. The sweep is linear, so a candidate inside
-embedded data is a false positive; review addresses before applying. See
-[docs/rea.md](docs/rea.md) for the full contract and limitations.
-
-## Decompile a function
+## Decompile a function (optional)
 
 `decompile` runs Ghidra 12.2 in headless mode, imports the binary into a
 temporary project, and prints the pseudocode and function signature. With no
-`--address`, it uses the PE/ELF/Mach-O entry point:
+`--address`, it uses the executable entry point:
 
 ```bash
 export JAVA_HOME="$HOME/.local/opt/jdk-25.0.5+8"
 export GHIDRA_INSTALL_DIR="$HOME/.local/opt/ghidra_12.2_PUBLIC"
 
 ./target/release/game-opt-tool decompile \
-  --game "/path/to/your/game/DeusEx.exe"
+  --game "/path/to/your/game/Game.exe"
 
-# A specific function, with its x86 disassembly:
 ./target/release/game-opt-tool decompile \
-  --game "/path/to/your/game/DeusEx.exe" \
+  --game "/path/to/your/game/Game.exe" \
   --address 0x109214b6 --assembly
-
-# Machine-readable output for scripts:
-./target/release/game-opt-tool decompile \
-  --game "/path/to/your/game/DeusEx.exe" \
-  --address 0x109214b6 --json
 ```
 
 The command fails if Ghidra cannot start or returns no result. It never falls
 back to placeholder pseudocode. Each invocation re-analyzes the binary, which
-takes roughly 20–30 seconds for Deus Ex; project caching is not implemented yet.
-Use `sample` (below) to find a real hot address, or `list_functions` to browse
-handles. A decompiled function is not yet fed into the optimizer
-automatically.
+takes roughly 20–30 seconds for Deus Ex.
 
-## Sample CPU time per function
+See [PREREQUISITES.md](PREREQUISITES.md) for the portable Ghidra/JDK setup.
 
-`sample` attaches to every thread of a running game with Linux
-`perf_event_open`, records instruction pointers on a user-space CPU clock,
-maps them through `/proc/<pid>/maps` to the PE image, and aggregates self CPU
-time by function. It does not use the `perf` binary and does not need root at
-`perf_event_paranoid=2`.
-
-```bash
-# Launch the game first, reach the scene, then sample it.
-./target/release/game-opt-tool sample \
-  --game "/path/to/your/game/DeusEx.exe" \
-  --duration 20 --frequency 333 --top 20
-
-# Raw PE RVAs when Ghidra is not configured:
-./target/release/game-opt-tool sample \
-  --game "/path/to/your/game/DeusEx.exe" \
-  --duration 10 --no-ghidra --json
-
-# Explicit process when the game path mapping is ambiguous:
-./target/release/game-opt-tool sample \
-  --game "/path/to/your/game/DeusEx.exe" \
-  --process DeusEx.exe --duration 10
-```
-
-The report separates **game**, **external** (Wine, ntdll, graphics driver,
-audio), and **unknown in-game** samples, and reports lost samples and
-ring-buffer overwrites. External samples are real CPU time, but they are not
-ranked as game functions. The first Ghidra-backed run builds a function map
-and can take ~30 seconds; later runs reuse the cache. `--refresh-functions`
-forces a rebuild.
-
-Read the result as one hypothesis, not a verdict. Sampler blind spots:
-
-- self CPU time only; callees are not attributed;
-- blocked time (locks, I/O, vsync) and kernel time are not sampled;
-- GPU busy time is invisible;
-- a hot function may not be on the frame-time critical path.
-
-Pair `sample` with `profile`/`compare` and read
-[METRICS.md](METRICS.md) before deciding that a CPU hotspot explains a hitch.
-
-## Measure real frame times
-
-MangoHud writes one CSV row per frame. Run the game through it once:
-
-```bash
-mkdir -p /tmp/mangohud
-cd "/path/to/your/game"
-MANGOHUD_CONFIG="output_folder=/tmp/mangohud,autostart_log=1,log_duration=0" \
-  mangohud --dlsym wine DeusEx.exe
-```
-
-`log_duration=0` keeps logging until the game exits. Then analyze the newest
-log in that directory:
-
-```bash
-./target/release/game-opt-tool profile \
-  --game "/path/to/your/game/DeusEx.exe" \
-  --log-dir /tmp/mangohud
-
-# Or a specific log, only the last 3600 frames, as JSON:
-./target/release/game-opt-tool profile \
-  --game "/path/to/your/game/DeusEx.exe" \
-  --log /tmp/mangohud/DeusEx_2026-10-24_18-00-00.csv \
-  --frames 3600 --json
-```
-
-The parser understands the metadata rows MangoHud writes before its
-`fps,frametime,...` header, reads the `frametime` column in milliseconds, and
-falls back to the `fps` column if `frametime` is absent. Invalid rows are
-skipped; long frames are kept so loading stalls are not hidden.
-
-### Compare two runs
-
-Capture a baseline and a patched run of the same scene, then compare them:
-
-```bash
-./target/release/game-opt-tool compare \
-  --baseline /tmp/mangohud/before.csv \
-  --patched /tmp/mangohud/after.csv
-
-# Machine-readable, with the last 3600 frames of each log:
-./target/release/game-opt-tool compare \
-  --baseline /tmp/mangohud/before.csv \
-  --patched /tmp/mangohud/after.csv \
-  --frames 3600 --json
-```
-
-The comparison reports the observed change in average FPS, 1% low, 0.1% low,
-p99 frame time, and stutter ratio, and marks whether each change is better or
-worse in the metric's own direction. It warns about short runs, mismatched
-durations, tail trimming, and does not claim statistical significance. A real
-capture pair showed why this matters: uncapping the frame rate raised average
-FPS from `48.0` to `1382.8`, but stutter ratio worsened from `1.06x` to
-`58.71x`. Raw FPS alone would have hidden that regression.
-
-### Metric definitions
-
-| Metric | Definition |
-|--------|------------|
-| Average FPS | `1000 / mean frame time` |
-| 1% low FPS | `1000 / mean of the slowest 1% of frame times` |
-| 0.1% low FPS | `1000 / mean of the slowest 0.1% of frame times` |
-| p95 / p99 frame time | Linear-interpolation percentiles |
-| Stutter ratio | `p99 frame time / median frame time` |
-| Min / max FPS | `1000 / slowest frame` and `1000 / fastest frame` |
-
-The 1% low is an *average of the slowest frames*, not the single 1st-percentile
-frame. That is why it can differ from the "1% Min FPS" column in MangoHud's own
-summary CSV. Both are reported by their own definitions; this tool's value is
-the one used for optimization comparisons.
-
-## Commands
-
-| Command | What it does today |
-|---------|--------------------|
-| `analyze --game <path> [--log <csv>] [--log-dir <dir>]` | Detects format/architecture and prints measured frame-time statistics when a log is available |
-| `profile --game <path> [--log <csv>] [--log-dir <dir>] [--frames N] [--json]` | Computes real metrics from a MangoHud CSV; `--frames` analyzes only the last N frames |
-| `sample --game <path> [--pid N\|--process NAME] [--duration N] [--frequency N] [--top N] [--no-ghidra] [--refresh-functions] [--json]` | Samples self CPU time per thread and resolves hot addresses through a cached Ghidra function map (Linux only) |
-| `compare --baseline <csv> --patched <csv> [--frames N] [--json]` | Compares two measured runs and reports per-metric deltas with interpretation notes |
-| `decompile --game <path> [--address <hex>] [--assembly] [--json]` | Decompiles one function with Ghidra; defaults to the executable entry point |
-| `rea --game <path> [--max-bytes N] [--spec-only] [--output <file>] [--manifest <json>] [--revert] [--json]` | Static iced-x86 sweep for safe, length-preserving candidates; emits a guarded spec and optionally patches a copy with a reversible manifest. No measurement |
-| `optimize --game <path> --output <dir>` | Stub: writes a copy with placeholder speedups; not a working optimizer |
-| `patch --game <path> --output <file> [--spec <json>] [--manifest <json>] [--dry-run] [--json]` | Writes a byte-identical copy unless `--spec` is supplied; `--spec` applies bounds-checked byte patches and optional code caves, writes a manifest, and `unpatch` rolls back exactly |
-| `unpatch --manifest <json>` | Restores exactly the bytes recorded in a patch manifest |
-| `verify --original <a> --patched <b>` | Compares bytes; changed files fail until runtime verification exists |
-| `backup --game <file> [--list] [--verify]` | Creates, lists, or checks backups |
-| `revert --game <file> [--backup <manifest>] [--dry-run]` | Restores the newest or a specific verified backup |
-| `doctor [--game <path>]` | Checks config, tools, binary, backup directory, and the sampling probe |
-| `mcp-server [--transport stdio\|http] [--host H] [--port P]` | Exposes the tools to AI agents over MCP (JSON-RPC 2.0); stdio by default |
-| `list-games`, `help <game>` | Lists configured targets / shows target notes |
-
-If neither `--log` nor `--log-dir` is given, `profile` looks for the newest
-MangoHud log in the current directory.
-
-Global flags: `--help`, `--version`.
+---
 
 ## Use with an AI agent (MCP)
 
 The tool exposes its real commands as MCP tools, so an agent such as OpenCode
-or Claude Code can inspect, decompile, profile, patch, and revert a binary
-without shell access.
+or Claude Code can inspect, decompile, patch, and revert a binary without shell
+access.
 
 ```bash
 # Build and register with OpenCode (no sudo, no LLM download)
@@ -351,107 +422,16 @@ opencode mcp add game-opt-tool --global -- \
 Exposed tools: `game_info`, `decompile`, `list_functions`, `sample`, `profile`,
 `compare`, `patch`, `unpatch`, `backup`, `backup_verify`, `verify`.
 
-The `sample` tool needs a running game and Linux `perf_event_open` permission.
-`decompile`/`list_functions`/name resolution need Ghidra and Java in the MCP
-server's environment. `profile`/`compare` need a MangoHud CSV captured by you;
-the tool never launches the game.
-
-### Guided optimization (`/optimize-game`)
-
-With OpenCode running in this repository, start the whole safe loop with:
-
-```text
-/optimize-game
-# or
-/optimize-game /path/to/your/game/DeusEx.exe
-```
-
-The command inspects and backs up the binary, profiles the baseline, samples
-the running game for real CPU hotspots, lists/decompiles one function at a
-time, drafts one patch spec, runs it with `dry_run`, applies only to a copy,
-then compares the runs. It stops for approval after each gate. See
-[WORKFLOW.md](WORKFLOW.md) for the user/AI/tool split, measurement rules, and
-limits, and [METRICS.md](METRICS.md) for the metric policy.
-
-### Context safety
-
 MCP output is designed for an agent context window, not for dumping a binary:
+responses are capped, decompilation is paginated, and `profile`/`compare`
+return statistics rather than raw CSV rows. The server is local-only by default
+(`127.0.0.1`) and stores no API keys.
 
-- Every tool response is capped; oversized responses are replaced with a
-  `{"truncated": true, ...}` envelope and a warning on stderr.
-- `decompile` returns pseudocode only (assembly is opt-in via
-  `include_assembly`) and is paginated: read `next_offset`, then call again
-  with `offset`. Default page: 24 KB (~6k tokens).
-- `list_functions` returns only address/name/size handles and is paginated, so
-  the agent can pick one function to decompile instead of reading everything.
-- `profile` and `compare` return statistics, never raw CSV rows.
-- Override the hard cap with `GAME_OPT_MCP_MAX_BYTES` (4 KB–1 MB, default
-  60 KB).
+The `/optimize-game` command in `.opencode/commands/` walks through the static
+REA loop and stops for approval at each gate. See [WORKFLOW.md](WORKFLOW.md) for
+the user/AI/tool split.
 
-The MCP server is local-only by default (`127.0.0.1`), stores no API keys, and
-calls exactly the same validated code paths as the CLI. The `decompile` tool
-needs `GHIDRA_INSTALL_DIR` and `JAVA_HOME` in the server's environment; pass
-them with `opencode mcp add --env KEY=VALUE ...` or export them before
-launching the agent. See [INSTALL_AI.md](INSTALL_AI.md) and
-[AI_PROVIDERS.md](AI_PROVIDERS.md).
-
-## Supported games
-
-| Game | Status |
-|------|--------|
-| **Deus Ex (2000)** | Test target: PE32/x86 detection, backup/revert, and Ghidra decompilation of entry point `0x109214B6` verified against the real executable |
-| Oblivion Remastered, Skyrim SE, Jedi: Survivor | Config entries only; no target-specific work |
-
-There are no measured speedups for any game yet. The table in older docs was
-aspirational.
-
-## How it works today
-
-```
-Path → format/arch detection → config lookup → command
-                                      │
-                    ┌─────────────────┼──────────────────┐
-                    ▼                 ▼                  ▼
-                backup/revert     doctor            verify (bytes)
-              SHA-256 + atomic
-
-MangoHud CSV → header discovery → frame times → avg / lows / percentiles / stutter
-                                              │
-                                              ▼
-                                     A/B compare (same scene)
-
-Running game → perf_event_open (per thread) → IP → /proc maps → PE RVA
-                              │
-                              ▼
-                    Ghidra function map (cached) → self CPU by function
-
-PE executable → linear iced-x86 sweep → safe candidates (length-preserving)
-                                      │
-                                      ▼
-                       guarded patch spec → verified Patcher → manifest
-
-PE/ELF/Mach-O → entry point or --address → Ghidra headless → pseudocode + disassembly
-
-AI agent (OpenCode / Claude Code / MCP client)
-        │  JSON-RPC 2.0 (stdio or HTTP)
-        ▼
-mcp-server → game_info / decompile / list_functions / sample / profile / compare / patch / unpatch / backup / verify
-        │
-        ▼
-bounded, paginated JSON (decompile pages, function handles, stats only)
-        │
-        ▼
-same validated code paths as the CLI
-```
-
-Planned pipeline (not fully implemented):
-
-```
-measure frame times → A/B compare runs → sample CPU per function (working) →
-form one hypothesis → decompile one function (working) → hand-written patch →
-patch a copy (working) → matched runtime A/B compare (manual) →
-keep only if the tail improves and behavior is unchanged
-```
+---
 
 ## Tests
 
@@ -459,21 +439,18 @@ keep only if the tail improves and behavior is unchanged
 cargo test
 ```
 
-Current suite: **217 tests passing, 1 ignored** (161 unit + 56 end-to-end
-CLI/MCP tests, plus one ignored real-Ghidra test). They cover SHA-256 NIST
-vectors, backup/restore round-trips, tampered and truncated backups, symlink
-refusal, permission preservation, PE/ELF/Mach-O magic detection, PE `MZ`
-detection, trampoline encoding and range checks, config parsing and name
-lookup, verifier truthfulness, MangoHud header/preamble and metric math, log
-discovery, A/B delta math and warnings, decompiler output parsing,
-function-list parsing, address validation, MCP initialize/tools-list/stdio/HTTP
-behavior, response capping and truncation envelopes, decompile pagination
-slicing, MCP patch → unpatch exact-byte round-trips, the real CLI backup →
-corrupt → revert flow, the real `perf_event_open` probe, sampling a busy child,
-ring-buffer wrap handling, `/proc` map parsing, Ghidra function-map matching and
-cache behavior, and CLI/MCP `sample` validation and failure paths.
+Current suite: **220 tests passing, 1 ignored**. The ignored test is the real
+Ghidra decompilation check; it needs Ghidra, JDK 25, and a game binary.
 
-Run the real Ghidra test explicitly (it takes about 30 seconds):
+The suite covers SHA-256 vectors, backup/restore round-trips, tampered and
+truncated backups, symlink refusal, permission preservation, PE/ELF/Mach-O
+detection, trampoline encoding, config parsing, verifier truthfulness, MangoHud
+header and metric math, log discovery, A/B delta math, decompiler output
+parsing, MCP transports and response caps, the real `perf_event_open` probe,
+`/proc` map parsing, Ghidra function-map caching, and the REA scan → spec →
+apply → revert flow, including refusal after a guarded byte is changed.
+
+Run the real Ghidra test explicitly:
 
 ```bash
 export JAVA_HOME="$HOME/.local/opt/jdk-25.0.5+8"
@@ -483,30 +460,7 @@ cargo test --test cli_decompile \
   decompiles_a_real_binary_entry_point -- --ignored
 ```
 
-The real-world checks include:
-
-- Deus Ex executable (253,952 bytes) restored byte-for-byte
-  (`sha256 3e6fdb89…bae00e`).
-- Ghidra 12.2 headless decompiled the real Deus Ex entry point
-  `0x109214B6` and returned the CRT `entry` pseudocode plus its x86
-  disassembly. It is startup code, not a performance hotspot; the point is that
-  the pipeline is real.
-- A genuine 143-frame MangoHud log produced by `glxgears`: the tool reported
-  average FPS `48.01` versus MangoHud's own summary `48.0`, average frame time
-  `20.83 ms` versus `20.8 ms`, and the same `0.1%` low of `42.45 FPS`.
-- Two genuine MangoHud captures of the same workload: `compare` reported
-  average FPS `48.01 → 1382.81` but stutter ratio `1.06x → 58.71x`, correctly
-  flagging the raw-FPS gain as a consistency regression.
-- Real per-function sampling on the Deus Ex menu: 20 seconds at 333 Hz produced
-  5,352 samples, 3 in the game module and 5,349 in external Wine/driver code,
-  with 0 samples lost. This is a real idle-workload measurement, not a
-  gameplay hotspot; it also shows why external samples are reported separately
-  instead of being blamed on the game. Sampler correctness is covered by the
-  busy-child and ring-wrap tests.
-- Real Ghidra symbol resolution: `list_functions` returned 945 Deus Ex handles
-  and the three menu sample addresses resolved to `FUN_10902020`,
-  `FUN_10902a20`, and `FUN_109146fb`. The binary is stripped, so these are
-  analysis names, not source symbols. Three samples do not rank hot functions.
+---
 
 ## Legal
 

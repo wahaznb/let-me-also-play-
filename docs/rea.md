@@ -6,8 +6,12 @@ Static binary analysis for game executables — **no measurement, no running the
 
 1. **Scans** executable PE sections with a linear iced-x86 sweep.
 2. **Finds** provably safe, length-preserving dead code:
-   - Dead moves (`mov reg, reg`) → NOPs
+   - True self-moves (for example `mov rax, rax`) → NOPs
    - Dead jumps (`jmp` to the immediately following instruction) → NOPs
+
+   A 32-bit self-move in 64-bit mode (`mov eax, eax`) is **not** treated as
+   dead: it zeroes the upper 32 bits of `RAX`, so removing it can change the
+   register's value.
 3. **Emits** a JSON patch spec you can apply with the verified Patcher.
 4. **Tracks** every change in a manifest so you can revert exactly.
 
@@ -71,5 +75,9 @@ Candidates (2):
   instructions and produce a false-positive candidate; the expected-byte guard
   protects against a different build, not against a false positive in the same
   build. Review the addresses before applying to a shipping binary.
+- A 32-bit self-move in 64-bit mode is deliberately skipped, even though it
+  looks like a no-op, because the write zero-extends into the 64-bit register.
+- No performance measurement is performed. A dead-code removal is not a proven
+  speedup.
 - No GPU or frame-time analysis. `profile`, `sample`, and `compare` are
   optional, separate commands and are not part of the REA decision.
