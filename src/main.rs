@@ -628,7 +628,7 @@ async fn rea_command(
     ));
     std::fs::write(&spec_path, serde_json::to_string_pretty(&spec)?)?;
 
-    let patch_report = patch_with_spec(
+    patch_with_spec(
         &game_info.path,
         &output_path,
         &spec_path,
@@ -637,12 +637,24 @@ async fn rea_command(
         json,
     )?;
 
+    let manifest_path = if let Some(m) = manifest {
+        m.to_path_buf()
+    } else {
+        let sha = crate::hash::sha256_hex(&std::fs::read(&output_path).unwrap_or_default());
+        let short_sha = &sha[..16];
+        output_path.with_file_name(format!(
+            "{}.{}.patch.json",
+            output_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("patched"),
+            short_sha
+        ))
+    };
+
     report.patch_path = Some(output_path.display().to_string());
-    report.manifest_path = Some(patch_report.manifest_path.display().to_string());
-    report.notes.push(format!(
-        "Applied {} patch(es) from REA candidates.",
-        patch_report.patches_applied
-    ));
+    report.manifest_path = Some(manifest_path.display().to_string());
+    report.notes.push("Applied REA candidates.".to_string());
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);

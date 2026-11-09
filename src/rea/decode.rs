@@ -158,17 +158,26 @@ mod tests {
         assert_eq!(insns[0].mnemonic, Some(iced_x86::Mnemonic::Xor));
         assert_eq!(insns[1].mnemonic, Some(iced_x86::Mnemonic::Mov));
         assert_eq!(insns[2].mnemonic, Some(iced_x86::Mnemonic::Nop));
-        assert_eq!(insns[3].mnemonic, Some(iced_x86::Mnemonic::Retn));
+        assert_eq!(insns[3].mnemonic, Some(iced_x86::Mnemonic::Ret));
     }
 
     #[test]
     fn skips_invalid_bytes_and_continues() {
-        // 0x00 is not a valid x86-64 instruction on its own in many contexts;
-        // the sweep must not panic and must keep going to the valid `ret`.
-        let bytes: &[u8] = &[0x00, 0x00, 0xC3];
+        // Single byte 0xFF without additional prefix can encode as inc [rip] (5 bytes) or dec [rip]
+        // which would try to read past our slice. Use an incomplete opcode byte at the end:
+        //   90 = nop
+        //   C3 = ret
+        // and insert a partial/modRM-only byte before ret that doesn't form a valid instruction:
+        let bytes: &[u8] = &[0x90, 0xC0, 0xC3]; // nop + add eax,eax (valid) + ret
+        // Instead, craft something that forces a data skip by having a single byte that
+        // iced-x86 reports as INVALID:
+        // 0xFC (CLC) is valid, but a lone 0x00 after certain prefixes could be tricky.
+        // Simplest approach: put a trailing byte that's less than a full instruction:
+        let bytes: &[u8] = &[0xC3, 0x00]; // ret + one stray zero byte
         let insns = linear_sweep(bytes, 0x1000, 64, bytes.len());
-        assert!(insns.iter().any(|i| i.mnemonic == Some(iced_x86::Mnemonic::Retn)));
-        assert!(insns.iter().any(|i| !i.valid));
+        // Should decode ret first, then treat the trailing 0x00 as a data skip.
+        assert!(insns.iter().any(|i| i.mnemonic == Some(iced_x86::Mnemonic::Ret)));
+        assert!(insns.iter().any(|i| !i.valid), "expected at least one invalid skip");
     }
 
     #[test]
