@@ -579,16 +579,8 @@ async fn rea_command(
         }
         println!();
         println!(
-            "  dead_code:     {}",
+            "  dead_code: {}",
             report.candidates_by_class.get("dead_code").copied().unwrap_or(0)
-        );
-        println!(
-            "  normalization: {}",
-            report
-                .candidates_by_class
-                .get("normalization")
-                .copied()
-                .unwrap_or(0)
         );
     }
 

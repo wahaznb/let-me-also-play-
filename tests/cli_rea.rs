@@ -1,9 +1,9 @@
 //! End-to-end tests for the static REA command.
 //!
 //! The fixture is a minimal PE32+ image whose `.text` section contains a
-//! no-op `mov eax,eax` and a `test eax,eax`. REA must detect both without
-//! running the binary, emit a guarded spec, apply it to a copy, and restore
-//! the exact original bytes from the manifest.
+//! no-op `mov eax,eax` and a `jmp` to the next instruction. REA must detect
+//! both without running the binary, emit a guarded spec, apply it to a copy,
+//! and restore the exact original bytes from the manifest.
 
 use serde_json::Value;
 use std::path::Path;
@@ -76,8 +76,8 @@ fn pe64() -> Vec<u8> {
     data[section + 20..section + 24].copy_from_slice(&0x400u32.to_le_bytes());
     data[section + 36..section + 40].copy_from_slice(&0x6000_0020u32.to_le_bytes());
 
-    // mov eax,eax ; test eax,eax ; ret
-    data[TEXT_OFFSET..TEXT_OFFSET + 5].copy_from_slice(&[0x89, 0xC0, 0x85, 0xC0, 0xC3]);
+    // mov eax,eax ; jmp +0 (to the next instruction) ; ret
+    data[TEXT_OFFSET..TEXT_OFFSET + 5].copy_from_slice(&[0x89, 0xC0, 0xEB, 0x00, 0xC3]);
     data
 }
 
@@ -97,10 +97,9 @@ fn rea_json_includes_the_candidate_list() {
 
     let report = json(&output);
     assert_eq!(report["candidates_total"], 2);
-    assert_eq!(report["candidates_by_class"]["dead_code"], 1);
-    assert_eq!(report["candidates_by_class"]["normalization"], 1);
+    assert_eq!(report["candidates_by_class"]["dead_code"], 2);
     assert_eq!(report["candidates_by_kind"]["dead_move"], 1);
-    assert_eq!(report["candidates_by_kind"]["test_self"], 1);
+    assert_eq!(report["candidates_by_kind"]["dead_jump"], 1);
 
     let candidates = report["candidates"].as_array().expect("candidate list");
     assert_eq!(candidates.len(), 2);
@@ -108,7 +107,7 @@ fn rea_json_includes_the_candidate_list() {
     assert_eq!(candidates[0]["address"], ENTRY_VA);
     assert_eq!(candidates[0]["expected"], serde_json::json!([0x89, 0xC0]));
     assert_eq!(candidates[0]["replacement"], serde_json::json!([0x66, 0x90]));
-    assert_eq!(candidates[1]["kind"], "test_self");
+    assert_eq!(candidates[1]["kind"], "dead_jump");
     assert_eq!(
         candidates[1]["address"],
         ENTRY_VA + 2,
@@ -142,8 +141,8 @@ fn rea_spec_only_prints_a_guarded_patch_spec() {
     assert_eq!(patches[0]["address"], format!("0x{ENTRY_VA:X}"));
     assert_eq!(patches[0]["expected"], "89c0");
     assert_eq!(patches[0]["replace"], "6690");
-    assert_eq!(patches[1]["expected"], "85c0");
-    assert_eq!(patches[1]["replace"], "33c0");
+    assert_eq!(patches[1]["expected"], "eb00");
+    assert_eq!(patches[1]["replace"], "6690");
 }
 
 #[test]
@@ -172,10 +171,9 @@ fn rea_apply_then_revert_restores_exact_bytes() {
 
     let patched_bytes = std::fs::read(&patched).unwrap();
     assert_ne!(patched_bytes, original);
-    assert_eq!(&patched_bytes[TEXT_OFFSET..TEXT_OFFSET + 2], &[0x66, 0x90]);
     assert_eq!(
-        &patched_bytes[TEXT_OFFSET + 2..TEXT_OFFSET + 4],
-        &[0x33, 0xC0]
+        &patched_bytes[TEXT_OFFSET..TEXT_OFFSET + 4],
+        &[0x66, 0x90, 0x66, 0x90]
     );
 
     let output = run(&[

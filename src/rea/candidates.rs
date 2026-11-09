@@ -5,13 +5,14 @@
 //! without ever running the game:
 //!
 //! * **dead_code** — instructions that do nothing and can be NOP-removed.
-//! * **normalization** — register idioms rewritten to their canonical form.
-//!   These are flag- and result-preserving but are *not* a measured speedup;
-//!   the report labels them as such.
 //!
 //! Every candidate is length-preserving: the replacement is exactly as many
 //! bytes as the original, so no relocation or following instruction shifts.
 //! This is what makes the patch safe to apply with the verified Patcher.
+//!
+//! The scan is linear, not control-flow-aware. A candidate found inside
+//! embedded data is a false positive; the report says so, and the user must
+//! review addresses before applying to a shipping binary.
 
 use super::decode::DecodedInsn;
 use iced_x86::{Mnemonic, OpKind};
@@ -24,10 +25,6 @@ pub enum CandidateKind {
     DeadMove,
     /// `jmp rel` whose target is the immediately following instruction.
     DeadJump,
-    /// `test reg, reg` — rewritten to the canonical `xor reg, reg`.
-    TestSelf,
-    /// `and reg, reg` — rewritten to the canonical `xor reg, reg`.
-    AndSelf,
 }
 
 impl CandidateKind {
@@ -35,15 +32,13 @@ impl CandidateKind {
         match self {
             CandidateKind::DeadMove => "dead_move",
             CandidateKind::DeadJump => "dead_jump",
-            CandidateKind::TestSelf => "test_self",
-            CandidateKind::AndSelf => "and_self",
         }
     }
 
-    /// Whether the transformation removes work (dead code) or merely
-    /// normalizes an idiom (no measured win).
+    /// Every candidate in the current catalog is dead code. The method is kept
+    /// so a future non-dead-code class cannot silently skip the report label.
     pub fn is_dead_code(&self) -> bool {
-        matches!(self, CandidateKind::DeadMove | CandidateKind::DeadJump)
+        true
     }
 }
 
@@ -71,7 +66,7 @@ impl Candidate {
         if self.kind.is_dead_code() {
             "dead_code"
         } else {
-            "normalization"
+            "other"
         }
     }
 }
@@ -108,7 +103,6 @@ fn classify(insn: &DecodedInsn, next_ip: Option<u64>) -> Option<(CandidateKind, 
     match mnemonic {
         Mnemonic::Mov => classify_mov(insn),
         Mnemonic::Jmp => classify_jmp(insn, next_ip?),
-        Mnemonic::Test | Mnemonic::And => classify_test_or_and(insn, mnemonic),
         _ => None,
     }
 }
@@ -129,7 +123,10 @@ fn classify_mov(insn: &DecodedInsn) -> Option<(CandidateKind, Vec<u8>, String)> 
 
 fn classify_jmp(insn: &DecodedInsn, next_ip: u64) -> Option<(CandidateKind, Vec<u8>, String)> {
     // In iced-x86, jmp rel8/rel32 reports as NearBranch64/NearBranch32.
-    if !matches!(insn.op0_kind, Some(OpKind::NearBranch64) | Some(OpKind::NearBranch32)) {
+    if !matches!(
+        insn.op0_kind,
+        Some(OpKind::NearBranch64) | Some(OpKind::NearBranch32)
+    ) {
         return None;
     }
     let target = near_target(insn)?;
@@ -142,45 +139,6 @@ fn classify_jmp(insn: &DecodedInsn, next_ip: u64) -> Option<(CandidateKind, Vec<
         insn.len
     );
     Some((CandidateKind::DeadJump, replacement, reason))
-}
-
-fn classify_test_or_and(
-    insn: &DecodedInsn,
-    mnemonic: Mnemonic,
-) -> Option<(CandidateKind, Vec<u8>, String)> {
-    let a = insn.op0_reg?;
-    let b = insn.op1_reg?;
-    if a != b || insn.op0_kind != Some(OpKind::Register) {
-        return None;
-    }
-    let (kind, from) = match mnemonic {
-        Mnemonic::Test => (CandidateKind::TestSelf, "test"),
-        Mnemonic::And => (CandidateKind::AndSelf, "and"),
-        _ => return None,
-    };
-    let replacement = replace_with_xor(insn)?;
-    let reason = format!(
-        "{from} {:?}, {:?} normalizes to xor {:?}, {:?} (identical flags and result)",
-        a, b, a, b
-    );
-    Some((kind, replacement, reason))
-}
-
-/// `xor reg,reg` replacement for a `test reg,reg` / `and reg,reg` instruction.
-fn replace_with_xor(insn: &DecodedInsn) -> Option<Vec<u8>> {
-    let bytes = &insn.bytes;
-    let op = opcode_offset(bytes);
-    let op_byte = bytes.get(op)?;
-    let xor_op = match *op_byte {
-        0x85 => 0x33, // test r/m, r
-        0x84 => 0x30, // test r/m8, r
-        0x23 => 0x33, // and r/m, r
-        0x20 => 0x30, // and r/m8, r
-        _ => return None,
-    };
-    let mut replacement = bytes.clone();
-    replacement[op] = xor_op;
-    Some(replacement)
 }
 
 /// Index of the opcode byte, skipping REX and operand/address-size prefixes.
@@ -200,7 +158,7 @@ fn nops_n(n: usize) -> Vec<u8> {
     let multi: &[(usize, &[u8])] = &[
         (5, &[0x0F, 0x1F, 0x44, 0x00, 0x00]),
         (4, &[0x0F, 0x1F, 0x40, 0x00]),
-        (3, &[0x0F, 0xAE, 0xE8]),
+        (3, &[0x0F, 0x1F, 0x00]),
         (2, &[0x66, 0x90]),
     ];
     let mut out = Vec::with_capacity(n);
@@ -256,7 +214,10 @@ mod tests {
         let insns = scan(&[0x89, 0xC0, 0xC3], 0x1000);
         let found = find_candidates(&insns);
         assert!(found.iter().any(|c| c.kind == CandidateKind::DeadMove));
-        let c = found.iter().find(|c| c.kind == CandidateKind::DeadMove).unwrap();
+        let c = found
+            .iter()
+            .find(|c| c.kind == CandidateKind::DeadMove)
+            .unwrap();
         assert_eq!(c.len, 2);
         assert_eq!(c.expected, vec![0x89, 0xC0]);
         assert_eq!(c.replacement, vec![0x66, 0x90]);
@@ -265,16 +226,8 @@ mod tests {
     #[test]
     fn detects_dead_jump_to_next() {
         // jmp rel8 with offset 0: target = ip + 2 + 0 = ip + 2 (next instruction)
-        // Bytes: EB 00 = jmp rel8, disp=0
-        // Next byte: 90 = nop
         let insns = scan(&[0xEB, 0x00, 0x90], 0x1000);
-        for (i, insn) in insns.iter().enumerate() {
-            eprintln!("insn[{}] valid={} ip=0x{:X} mnemo={:?}", i, insn.valid, insn.ip, insn.mnemonic);
-        }
         let found = find_candidates(&insns);
-        for c in &found {
-            eprintln!("candidate kind={:?} addr=0x{:X}", c.kind, c.address);
-        }
         assert!(found.iter().any(|c| c.kind == CandidateKind::DeadJump));
     }
 
@@ -282,42 +235,9 @@ mod tests {
     fn jump_over_next_is_not_dead() {
         // jmp short +2 skips the next instruction -> not a fallthrough dead jump
         let insns = scan(&[0xEB, 0x02, 0x90, 0x90], 0x1000);
-        assert!(!find_candidates(&insns).iter().any(|c| c.kind == CandidateKind::DeadJump));
-    }
-
-    #[test]
-    fn test_self_becomes_xor_same_length() {
-        // test eax,eax (0x85 C0) ; ret
-        let insns = scan(&[0x85, 0xC0, 0xC3], 0x1000);
-        let c = find_candidates(&insns)
-            .into_iter()
-            .find(|c| c.kind == CandidateKind::TestSelf)
-            .expect("test_self candidate");
-        assert_eq!(c.replacement, vec![0x33, 0xC0]);
-        assert_eq!(c.len, 2);
-    }
-
-    #[test]
-    fn test_self_64bit_keeps_rex_prefix() {
-        // test rax,rax (0x48 0x85 C0) ; ret
-        let insns = scan(&[0x48, 0x85, 0xC0, 0xC3], 0x1000);
-        let c = find_candidates(&insns)
-            .into_iter()
-            .find(|c| c.kind == CandidateKind::TestSelf)
-            .expect("test_self candidate");
-        assert_eq!(c.replacement, vec![0x48, 0x33, 0xC0]);
-        assert_eq!(c.len, 3);
-    }
-
-    #[test]
-    fn and_self_becomes_xor() {
-        // and eax,eax (0x23 C0) ; ret
-        let insns = scan(&[0x23, 0xC0, 0xC3], 0x1000);
-        let c = find_candidates(&insns)
-            .into_iter()
-            .find(|c| c.kind == CandidateKind::AndSelf)
-            .expect("and_self candidate");
-        assert_eq!(c.replacement, vec![0x33, 0xC0]);
+        assert!(!find_candidates(&insns)
+            .iter()
+            .any(|c| c.kind == CandidateKind::DeadJump));
     }
 
     #[test]
@@ -328,10 +248,33 @@ mod tests {
     }
 
     #[test]
+    fn test_and_xor_are_not_rewritten() {
+        // test eax,eax / and eax,eax must not be flagged: replacing either with
+        // xor would zero the register and change its flags.
+        let insns = scan(&[0x85, 0xC0, 0x23, 0xC0, 0xC3], 0x1000);
+        assert!(find_candidates(&insns).is_empty());
+    }
+
+    #[test]
+    fn nops_are_real_nops_at_every_length() {
+        // 0F AE E8 is lfence, not a NOP; the 3-byte form must be 0F 1F 00.
+        assert_eq!(nops_n(3), vec![0x0F, 0x1F, 0x00]);
+        assert_eq!(nops_n(1), vec![0x90]);
+        assert_eq!(nops_n(2), vec![0x66, 0x90]);
+        for n in 3..=8 {
+            let nops = nops_n(n);
+            assert_eq!(nops.len(), n, "NOP sequence must preserve length");
+            assert_eq!(nops[0], 0x0F, "multi-byte NOP opcode");
+        }
+    }
+
+    #[test]
     fn every_candidate_is_length_preserving() {
-        // A mixed stream
-        let insns = scan(&[0x89, 0xC0, 0x85, 0xC0, 0x23, 0xC0, 0xEB, 0x02, 0x90, 0xC3], 0x1000);
-        for c in find_candidates(&insns) {
+        // A mixed stream: mov eax,eax ; jmp +0 ; nop ; ret
+        let insns = scan(&[0x89, 0xC0, 0xEB, 0x00, 0x90, 0xC3], 0x1000);
+        let found = find_candidates(&insns);
+        assert!(!found.is_empty());
+        for c in found {
             assert_eq!(c.expected.len(), c.replacement.len());
         }
     }

@@ -3,15 +3,16 @@
 //! REA is the "analyze → decide → patch" loop without any measurement:
 //!
 //! 1. **analyze** — linear-sweep the executable sections with `iced-x86`.
-//! 2. **decide** — flag *provably safe* candidates (dead code, register
-//!    normalization). Every candidate is length-preserving.
+//! 2. **decide** — flag *provably safe* dead code. Every candidate is
+//!    length-preserving.
 //! 3. **patch** — emit a `PatchSpec` and apply it with the verified Patcher,
 //!    which backs up the original, writes atomically, and records a manifest.
 //! 4. **revert** — `unpatch` restores exactly, byte for byte.
 //!
-//! No game is launched. No timing is measured. The report is explicit about
-//! which candidates are dead code (removed work) and which are normalizations
-//! (no measured win).
+//! No game is launched. No timing is measured. The sweep is linear, not
+//! control-flow-aware, so a candidate found inside embedded data is a false
+//! positive; the report says so and the user should review addresses before
+//! applying to a shipping binary.
 
 pub mod decode;
 pub mod candidates;
