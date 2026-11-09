@@ -20,8 +20,9 @@ pub mod rea;
 pub mod targets;
 
 use anyhow::{bail, Context, Result};
-use clap::Parser;
 use clap::CommandFactory;
+use clap::Parser;
+use patcher::PatchReport;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use tracing::{info, error};
@@ -419,6 +420,7 @@ async fn main() -> Result<()> {
                     manifest.as_deref(),
                     dry_run,
                     json,
+                    false,
                 )?;
             } else if dry_run || json || manifest.is_some() {
                 bail!(
@@ -514,7 +516,7 @@ async fn rea_command(
     revert: bool,
     json: bool,
 ) -> Result<()> {
-    use patcher::{PatchSpec, Patcher};
+    use patcher::Patcher;
     use rea::{analyze, patch::build_patch_spec};
 
     if revert {
@@ -539,62 +541,63 @@ async fn rea_command(
     let game_info = game::GameInfo::from_path(game)?;
     let (candidates, mut report) = analyze(&game_info, max_bytes)?;
 
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-        return Ok(());
-    }
+    if !json {
+        println!("=== REA: static analysis ===");
+        println!("Game:       {}", game_info.name);
+        println!("Executable: {}", game_info.path.display());
+        println!("Format:     {:?}", game_info.binary_format);
+        println!("Arch:       {}", game_info.architecture);
+        println!();
 
-    // Report
-    println!("=== REA: static analysis ===");
-    println!("Game:       {}", game_info.name);
-    println!("Executable: {}", game_info.path.display());
-    println!("Format:     {:?}", game_info.binary_format);
-    println!("Arch:       {}", game_info.architecture);
-    println!();
-
-    for section in &report.sections_scanned {
-        println!(
-            "  {:<12} VA 0x{:X}  {} bytes  {} insns  {} data  {} candidates",
-            section.name,
-            section.va,
-            section.bytes,
-            section.instructions,
-            section.data_skips,
-            section.candidates
-        );
+        for section in &report.sections_scanned {
+            println!(
+                "  {:<12} VA 0x{:X}  {} bytes  {} insns  {} data  {} candidates",
+                section.name,
+                section.va,
+                section.bytes,
+                section.instructions,
+                section.data_skips,
+                section.candidates
+            );
+        }
     }
 
     if report.candidates_total == 0 {
-        println!("\nNo safe candidates found in the scanned regions.");
         report.notes.push("No candidates; nothing to patch.".to_string());
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            println!("\nNo safe candidates found in the scanned regions.");
+        }
         return Ok(());
     }
 
-    println!("\nCandidates ({}):", report.candidates_total);
-    for c in &candidates {
+    if !json {
+        println!("\nCandidates ({}):", report.candidates_total);
+        for c in &report.candidates {
+            println!("  0x{:X}  {:<12} {}", c.address, c.kind.as_str(), c.reason);
+        }
+        println!();
         println!(
-            "  0x{:X}  {:<12} {}",
-            c.address,
-            c.kind.as_str(),
-            c.reason
+            "  dead_code:     {}",
+            report.candidates_by_class.get("dead_code").copied().unwrap_or(0)
+        );
+        println!(
+            "  normalization: {}",
+            report
+                .candidates_by_class
+                .get("normalization")
+                .copied()
+                .unwrap_or(0)
         );
     }
-    println!();
-    println!(
-        "  dead_code:     {}",
-        report.candidates_by_class.entry("dead_code".to_string()).or_insert(0)
-    );
-    println!(
-        "  normalization: {}",
-        report
-            .candidates_by_class
-            .entry("normalization".to_string())
-            .or_insert(0)
-    );
 
     let target_sha256 = Some(crate::hash::sha256_hex(&std::fs::read(&game_info.path)?));
     let spec = build_patch_spec(
-        Some(format!("rea-{}", game_info.name.to_lowercase().replace(' ', "-"))),
+        Some(format!(
+            "rea-{}",
+            game_info.name.to_lowercase().replace(' ', "-")
+        )),
         target_sha256,
         false,
         &candidates,
@@ -602,23 +605,34 @@ async fn rea_command(
 
     let Some(spec) = spec else {
         report.notes.push("No candidates after validation.".to_string());
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         return Ok(());
     };
 
+    let spec_json = serde_json::to_string_pretty(&spec)?;
+    report.patch_spec = Some(spec_json.clone());
+
     if spec_only {
-        let json_str = serde_json::to_string_pretty(&spec)?;
-        report.patch_spec = Some(json_str.clone());
         if json {
-            println!("{}", json_str);
+            println!("{}", spec_json);
         } else {
-            println!("\nPatch spec (not applied):\n{}", json_str);
+            println!("\nPatch spec (not applied):\n{}", spec_json);
         }
         return Ok(());
     }
 
-    let output_path = output
-        .ok_or_else(|| anyhow::anyhow!("--output <path> is required to apply a patch"))?
-        .to_path_buf();
+    let Some(output) = output else {
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            println!("\nNo --output given; nothing was applied.");
+            println!("Use --spec-only to print the patch spec, or --output <copy> to apply it.");
+        }
+        return Ok(());
+    };
+    let output_path = output.to_path_buf();
     let manifest_path = manifest.map(|p| p.to_path_buf());
 
     let spec_path = std::env::temp_dir().join(format!(
@@ -626,40 +640,41 @@ async fn rea_command(
         std::process::id(),
         game_info.path.file_name().unwrap_or_default().to_string_lossy()
     ));
-    std::fs::write(&spec_path, serde_json::to_string_pretty(&spec)?)?;
+    std::fs::write(&spec_path, &spec_json)?;
 
-    patch_with_spec(
+    let apply_result = patch_with_spec(
         &game_info.path,
         &output_path,
         &spec_path,
         manifest_path.as_deref(),
         false,
         json,
-    )?;
+        json,
+    );
+    let _ = std::fs::remove_file(&spec_path);
 
-    let manifest_path = if let Some(m) = manifest {
-        m.to_path_buf()
-    } else {
-        let sha = crate::hash::sha256_hex(&std::fs::read(&output_path).unwrap_or_default());
-        let short_sha = &sha[..16];
-        output_path.with_file_name(format!(
-            "{}.{}.patch.json",
-            output_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("patched"),
-            short_sha
-        ))
-    };
-
-    report.patch_path = Some(output_path.display().to_string());
-    report.manifest_path = Some(manifest_path.display().to_string());
-    report.notes.push("Applied REA candidates.".to_string());
+    let patch_report = apply_result?;
+    report.patch_path = Some(patch_report.output_path.display().to_string());
+    report.manifest_path = Some(patch_report.manifest_path.display().to_string());
+    report.notes.push(format!(
+        "Applied {} patch(es) from REA candidates.",
+        patch_report.patches_applied
+    ));
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "\nREA patch written to {}.",
+            patch_report.output_path.display()
+        );
+        println!("Manifest: {}", patch_report.manifest_path.display());
+        println!(
+            "Revert with: game-opt-tool rea --game {} --revert --manifest {}",
+            patch_report.output_path.display(),
+            patch_report.manifest_path.display()
+        );
     }
-    let _ = std::fs::remove_file(&spec_path);
     Ok(())
 }
 
@@ -739,7 +754,8 @@ fn patch_with_spec(
     manifest_path: Option<&Path>,
     dry_run: bool,
     json: bool,
-) -> Result<()> {
+    quiet: bool,
+) -> Result<PatchReport> {
     use patcher::{PatchSpec, Patcher};
 
     if !game_path.exists() {
@@ -787,9 +803,13 @@ fn patch_with_spec(
         dry_run,
     )?;
 
+    if quiet {
+        return Ok(report);
+    }
+
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
-        return Ok(());
+        return Ok(report);
     }
 
     let action = if dry_run { "Would apply" } else { "Applied" };
@@ -826,7 +846,7 @@ fn patch_with_spec(
             patch.address, patch.section, patch.before_hex, patch.after_hex
         );
     }
-    Ok(())
+    Ok(report)
 }
 
 fn unpatch_command(

@@ -21,7 +21,6 @@ use crate::game::GameInfo;
 use crate::patcher::pe::PeInfo;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 /// One executable region that was scanned.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +42,8 @@ pub struct ReaReport {
     pub executable: String,
     pub sections_scanned: Vec<ScannedSection>,
     pub candidates_total: usize,
+    #[serde(default)]
+    pub candidates: Vec<candidates::Candidate>,
     pub candidates_by_kind: std::collections::HashMap<String, usize>,
     pub candidates_by_class: std::collections::HashMap<String, usize>,
     pub patch_spec: Option<String>,
@@ -61,6 +62,7 @@ impl ReaReport {
             executable: game.path.display().to_string(),
             sections_scanned: Vec::new(),
             candidates_total: 0,
+            candidates: Vec::new(),
             candidates_by_kind: std::collections::HashMap::new(),
             candidates_by_class: std::collections::HashMap::new(),
             patch_spec: None,
@@ -147,6 +149,7 @@ pub fn analyze(
     }
 
     report.candidates_total = all_candidates.len();
+    report.candidates = all_candidates.clone();
     for c in &all_candidates {
         *report.candidates_by_kind.entry(c.kind.as_str().to_string()).or_insert(0) += 1;
         *report.candidates_by_class.entry(c.class().to_string()).or_insert(0) += 1;

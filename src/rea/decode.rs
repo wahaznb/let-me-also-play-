@@ -75,7 +75,7 @@ pub fn linear_sweep(bytes: &[u8], base_ip: u64, bitness: u32, max_bytes: usize) 
 
     let mut pos: usize = 0;
     while pos < limit {
-        if let Err(_) = decoder.set_position(pos) {
+        if decoder.set_position(pos).is_err() {
             break;
         }
         decoder.set_ip(base_ip + pos as u64);
@@ -102,7 +102,7 @@ pub fn linear_sweep(bytes: &[u8], base_ip: u64, bitness: u32, max_bytes: usize) 
             continue;
         }
 
-        let len = instr.len() as usize;
+        let len = instr.len();
         if pos + len > limit {
             // Truncated at the scan boundary: treat the remainder as data.
             out.push(DecodedInsn {
@@ -163,21 +163,17 @@ mod tests {
 
     #[test]
     fn skips_invalid_bytes_and_continues() {
-        // Single byte 0xFF without additional prefix can encode as inc [rip] (5 bytes) or dec [rip]
-        // which would try to read past our slice. Use an incomplete opcode byte at the end:
-        //   90 = nop
-        //   C3 = ret
-        // and insert a partial/modRM-only byte before ret that doesn't form a valid instruction:
-        let bytes: &[u8] = &[0x90, 0xC0, 0xC3]; // nop + add eax,eax (valid) + ret
-        // Instead, craft something that forces a data skip by having a single byte that
-        // iced-x86 reports as INVALID:
-        // 0xFC (CLC) is valid, but a lone 0x00 after certain prefixes could be tricky.
-        // Simplest approach: put a trailing byte that's less than a full instruction:
-        let bytes: &[u8] = &[0xC3, 0x00]; // ret + one stray zero byte
+        // A trailing lone 0x00 is not a complete instruction. The sweep must
+        // record it as a data skip instead of panicking or stopping early.
+        let bytes: &[u8] = &[0xC3, 0x00];
         let insns = linear_sweep(bytes, 0x1000, 64, bytes.len());
-        // Should decode ret first, then treat the trailing 0x00 as a data skip.
-        assert!(insns.iter().any(|i| i.mnemonic == Some(iced_x86::Mnemonic::Ret)));
-        assert!(insns.iter().any(|i| !i.valid), "expected at least one invalid skip");
+        assert!(insns
+            .iter()
+            .any(|i| i.mnemonic == Some(iced_x86::Mnemonic::Ret)));
+        assert!(
+            insns.iter().any(|i| !i.valid),
+            "expected at least one invalid skip"
+        );
     }
 
     #[test]

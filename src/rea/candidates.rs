@@ -18,6 +18,7 @@ use iced_x86::{Mnemonic, OpKind};
 
 /// Why a candidate was flagged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CandidateKind {
     /// `mov reg, reg` — a no-op move.
     DeadMove,
