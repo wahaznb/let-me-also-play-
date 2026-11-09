@@ -60,6 +60,7 @@ exports/
 
 # Local agent learning state and session data
 /.vibe-wise/
+/.court/
 /.opencode/state/
 /.agents/
 .continue/
