@@ -43,6 +43,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Binary parsing
 goblin = "0.8"
 object = "0.35"
+# x86/x86-64 decode + re-encode (REA byte-level code generation)
+iced-x86 = "1.22"
 # Memory reading
 memmap2 = "0.9"
 

@@ -16,6 +16,7 @@ mod backup;
 mod hash;
 mod mcp;
 mod sampler;
+pub mod rea;
 pub mod targets;
 
 use anyhow::{bail, Context, Result};
@@ -193,6 +194,38 @@ enum Command {
         /// Validate and report without writing the output or manifest
         #[arg(long)]
         dry_run: bool,
+
+        /// Print machine-readable JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Static reverse-engineering analysis: find safe, length-preserving
+    /// optimization candidates and (optionally) patch them. No measurement.
+    Rea {
+        /// Path to the game executable
+        #[arg(short, long)]
+        game: std::path::PathBuf,
+
+        /// Maximum bytes to scan per executable section
+        #[arg(long, default_value = "1048576")]
+        max_bytes: usize,
+
+        /// Print the generated patch spec but do not apply it
+        #[arg(long)]
+        spec_only: bool,
+
+        /// Output path for the patched executable
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+
+        /// Write the patch manifest here instead of next to the output
+        #[arg(long)]
+        manifest: Option<std::path::PathBuf>,
+
+        /// Revert the patch recorded in --manifest instead of applying one
+        #[arg(long)]
+        revert: bool,
 
         /// Print machine-readable JSON instead of text
         #[arg(long)]
@@ -406,6 +439,27 @@ async fn main() -> Result<()> {
             info!("Reverting patch manifest: {:?}", manifest);
             unpatch_command(&manifest, game.as_deref(), dry_run, json)?;
         }
+        Some(Command::Rea {
+            game,
+            max_bytes,
+            spec_only,
+            output,
+            manifest,
+            revert,
+            json,
+        }) => {
+            info!("REA scan on {:?}", game);
+            rea_command(
+                &game,
+                max_bytes,
+                spec_only,
+                output.as_deref(),
+                manifest.as_deref(),
+                revert,
+                json,
+            )
+            .await?;
+        }
         Some(Command::Verify { original, patched }) => {
             info!("Verifying: {:?} vs {:?}", original, patched);
             
@@ -447,6 +501,153 @@ async fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// REA: static analysis → candidate detection → optional patch.
+async fn rea_command(
+    game: &std::path::Path,
+    max_bytes: usize,
+    spec_only: bool,
+    output: Option<&std::path::Path>,
+    manifest: Option<&std::path::Path>,
+    revert: bool,
+    json: bool,
+) -> Result<()> {
+    use patcher::{PatchSpec, Patcher};
+    use rea::{analyze, patch::build_patch_spec};
+
+    if revert {
+        let manifest_path = manifest.ok_or_else(|| {
+            anyhow::anyhow!("--revert requires --manifest <patch-manifest.json>")
+        })?;
+        let report = Patcher::unpatch(manifest_path, output, false)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
+        println!(
+            "Reverted {} byte patch(es) and {} code section(s).",
+            report.patches_reverted, report.sections_removed
+        );
+        println!("  target:  {}", report.target.display());
+        println!("  before:  {}", report.output_sha256);
+        println!("  after:   {}", report.restored_sha256);
+        return Ok(());
+    }
+
+    let game_info = game::GameInfo::from_path(game)?;
+    let (candidates, mut report) = analyze(&game_info, max_bytes)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    // Report
+    println!("=== REA: static analysis ===");
+    println!("Game:       {}", game_info.name);
+    println!("Executable: {}", game_info.path.display());
+    println!("Format:     {:?}", game_info.binary_format);
+    println!("Arch:       {}", game_info.architecture);
+    println!();
+
+    for section in &report.sections_scanned {
+        println!(
+            "  {:<12} VA 0x{:X}  {} bytes  {} insns  {} data  {} candidates",
+            section.name,
+            section.va,
+            section.bytes,
+            section.instructions,
+            section.data_skips,
+            section.candidates
+        );
+    }
+
+    if report.candidates_total == 0 {
+        println!("\nNo safe candidates found in the scanned regions.");
+        report.notes.push("No candidates; nothing to patch.".to_string());
+        return Ok(());
+    }
+
+    println!("\nCandidates ({}):", report.candidates_total);
+    for c in &candidates {
+        println!(
+            "  0x{:X}  {:<12} {}",
+            c.address,
+            c.kind.as_str(),
+            c.reason
+        );
+    }
+    println!();
+    println!(
+        "  dead_code:     {}",
+        report.candidates_by_class.entry("dead_code".to_string()).or_insert(0)
+    );
+    println!(
+        "  normalization: {}",
+        report
+            .candidates_by_class
+            .entry("normalization".to_string())
+            .or_insert(0)
+    );
+
+    let target_sha256 = Some(crate::hash::sha256_hex(&std::fs::read(&game_info.path)?));
+    let spec = build_patch_spec(
+        Some(format!("rea-{}", game_info.name.to_lowercase().replace(' ', "-"))),
+        target_sha256,
+        false,
+        &candidates,
+    )?;
+
+    let Some(spec) = spec else {
+        report.notes.push("No candidates after validation.".to_string());
+        return Ok(());
+    };
+
+    if spec_only {
+        let json_str = serde_json::to_string_pretty(&spec)?;
+        report.patch_spec = Some(json_str.clone());
+        if json {
+            println!("{}", json_str);
+        } else {
+            println!("\nPatch spec (not applied):\n{}", json_str);
+        }
+        return Ok(());
+    }
+
+    let output_path = output
+        .ok_or_else(|| anyhow::anyhow!("--output <path> is required to apply a patch"))?
+        .to_path_buf();
+    let manifest_path = manifest.map(|p| p.to_path_buf());
+
+    let spec_path = std::env::temp_dir().join(format!(
+        "rea-{}-{}.spec.json",
+        std::process::id(),
+        game_info.path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    std::fs::write(&spec_path, serde_json::to_string_pretty(&spec)?)?;
+
+    let patch_report = patch_with_spec(
+        &game_info.path,
+        &output_path,
+        &spec_path,
+        manifest_path.as_deref(),
+        false,
+        json,
+    )?;
+
+    report.patch_path = Some(output_path.display().to_string());
+    report.manifest_path = Some(patch_report.manifest_path.display().to_string());
+    report.notes.push(format!(
+        "Applied {} patch(es) from REA candidates.",
+        patch_report.patches_applied
+    ));
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    }
+    let _ = std::fs::remove_file(&spec_path);
     Ok(())
 }
 
