@@ -1,7 +1,7 @@
 //! End-to-end tests for the MCP server (`mcp-server`).
 //!
 //! These drive the real compiled binary over both transports, exactly like an
-//! AI agent would: JSON-RPC over stdio and JSON-RPC over HTTP.
+//! MCP client would: JSON-RPC over stdio and JSON-RPC over HTTP.
 
 use serde_json::{json, Value};
 use std::collections::HashMap;

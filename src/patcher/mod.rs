@@ -299,7 +299,7 @@ impl Patcher {
         }
 
         let section_plans = build_section_plans(&pe, &input, spec)?;
-        let planned_patches = build_patch_plan(&self, &pe, &input, spec, &section_plans)?;
+        let planned_patches = build_patch_plan(self, &pe, &input, spec, &section_plans)?;
 
         let mut output = input.clone();
         for patch in &planned_patches {

@@ -1,20 +1,18 @@
-//! Target-specific game configurations
+//! Target-specific game detection.
 //!
-//! Modules for different game targets and their optimization profiles.
+//! Each target module answers one question: can this executable be treated as
+//! that game? Configuration and addresses live in `config/games.yaml` and in
+//! the patch specs you write, not in hard-coded tables here.
 
 use crate::game::GameInfo;
 pub mod deus_ex;
 
-/// Detect and load configuration for a known game
+/// Detect a known game and load its shared configuration.
 pub fn detect_game(game_path: &std::path::Path) -> anyhow::Result<GameInfo> {
-
-    // Try Deus Ex (2000) detection
     if crate::targets::deus_ex::DeusExInfo::detect(game_path).is_ok() {
         let game_info = GameInfo::from_path(game_path)?;
         return Ok(game_info);
     }
-
-    // Add other game detections here...
 
     anyhow::bail!("Unsupported game binary");
 }

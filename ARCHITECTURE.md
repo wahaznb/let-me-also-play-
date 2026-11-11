@@ -1,448 +1,132 @@
-# Game Opt Tool — Architecture
+# Architecture
 
-This document explains how the tool works, with diagrams and data flow.
+The tool is a single Rust binary plus a small MCP server that calls the same
+handlers. There is no daemon, no database, and no runtime network access.
 
-## High-Level Architecture
+## Modules
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                            USER COMMAND                                     │
-│                                                                          │
-│   game-opt-tool patch --game game.exe --output patched.exe --spec s.json  │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           CLI LAYER (main.rs)                               │
-│                                                                          │
-│   • Parses arguments with clap                                           │
-│   • Dispatches to command handler                                        │
-│   • Formats output (text or JSON)                                        │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                    ┌───────────────┼───────────────┐
-                    ▼               ▼               ▼
-┌───────────────┐ ┌───────────────┐ ┌───────────────┐
-│   Patcher     │ │   Backup      │ │  Decompiler   │
-│  (patcher/)   │ │   (backup/)   │ │ (decompiler/) │
-└───────┬───────┘ └───────┬───────┘ └───────┬───────┘
-        │                 │                 │
-        ▼                 ▼                 ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         CORE LOGIC                                          │
-│                                                                          │
-│  PE Parser        │  Backup Manager     │  Ghidra Runner                 │
-│  ───────────      │  ──────────         │  ───────────                   │
-│  • parse_pe()     │  • create()         │  • analyze()                   │
-│  • map_rva()      │  • list_backups()   │  • decompile()                 │
-│  • plan_section() │  • verify()         │  • parse_result()              │
-│  • compute_cksum  │  • restore()        │                                │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         FILE SYSTEM                                         │
-│                                                                          │
-│  Input:                        Output:                                   │
-│  ├── game.exe                   ├── patched.exe                          │
-│  ├── patch.json                 ├── patched.exe.sha256.patch.json        │
-│  └── backup.exe.abc123.bak      └── backup.exe.abc123.bak.json           │
-│      backup.exe.abc123.bak.json                                │
-└─────────────────────────────────────────────────────────────────────────────┘
+```text
+src/
+├── main.rs          CLI parsing, dispatch, and output formatting
+├── config/          config/games.yaml parsing
+├── game/            format and architecture detection, game lookup
+├── hash/            SHA-256 helpers
+├── backup/          verified backups and restores
+├── patcher/         PE patching, patch specs, manifests
+├── verifier/        byte-level comparison only
+├── decompiler/      Ghidra headless runner
+├── profiler/        MangoHud CSV parsing and frame-time math
+├── sampler/         Linux perf_event_open self-CPU sampling
+├── rea/             static dead-code analysis (the primary workflow)
+├── targets/         per-game detection
+└── mcp/             stdio + HTTP MCP transports
 ```
 
-## Data Flow: Patching a Binary
+## The primary path: REA
 
+```text
+game.exe
+   │  read + SHA-256
+   ▼
+PE headers ──► executable sections
+   │
+   ▼
+iced-x86 linear sweep ──► DecodedInstruction stream
+   │
+   ▼
+candidate rules ──► Candidate { address, original, replacement, kind }
+   │
+   ▼
+PatchSpec (expected bytes + target hash)
+   │
+   ▼
+Patcher ──► bounds check ──► expected-byte check ──► section check
+   │
+   ▼
+atomic write ──► patched copy + manifest
+   │
+   ▼
+revert ──► verify patched hash + bytes ──► restore original bytes
 ```
-Step 1: Read Input
-───────────────────
-game.exe (254 KB)
-    │
-    ▼
-Step 2: Parse PE Headers
-───────────────────────
-┌────────────────────────────────────────────────────────────────────┐
-│  DOS Header (64 bytes)                                             │
-│  ├─ MZ signature at offset 0                                      │
-│  ├─ e_lfanew at offset 0x3C (points to PE signature)              │
-│  └─ [padding]                                                     │
-│                                                                    │
-│  PE Signature (4 bytes) @ 0x80                                    │
-│  ├─ "PE\0\0"                                                       │
-│  └─ [end]                                                          │
-│                                                                    │
-│  COFF Header (20 bytes) @ 0x84                                    │
-│  ├─ Machine: 0x014C (x86)                                         │
-│  ├─ NumberOfSections: 6                                            │
-│  ├─ SizeOfOptionalHeader: 224                                      │
-│  └─ Characteristics: 0x0102                                        │
-│                                                                    │
-│  Optional Header (224 bytes) @ 0x98                               │
-│  ├─ Magic: 0x10B (PE32)                                           │
-│  ├─ ImageBase: 0x00400000                                          │
-│  ├─ SectionAlignment: 0x1000                                       │
-│  ├─ FileAlignment: 0x200                                           │
-│  ├─ SizeOfImage: 0x66000                                           │
-│  ├─ SizeOfHeaders: 0x1000                                          │
-│  ├─ CheckSum: 0x00000000                                           │
-│  ├─ NumberOfRvaAndSizes: 16                                        │
-│  └─ DataDirectories[16]                                            │
-│                                                                    │
-│  Section Table (6 × 40 = 240 bytes) @ 0x178                       │
-│  ├─ .text: VA=0x1000, VSize=0x246DC, Raw=0x400, Size=0x25000     │
-│  ├─ .rdata: VA=0x26000, VSize=0x5DB4, Raw=0x26000, Size=0x6000   │
-│  ├─ .data: VA=0x2C000, VSize=0x3000, Raw=0x2C000, Size=0x4000    │
-│  ├─ .idata: VA=0x57000, VSize=0x4916, Raw=0x57000, Size=0x5000   │
-│  ├─ .rsrc: VA=0x5C000, VSize=0x58D9, Raw=0x5C000, Size=0x6000    │
-│  └─ .reloc: VA=0x62000, VSize=0x3863, Raw=0x62000, Size=0x4000   │
-└────────────────────────────────────────────────────────────────────┘
-    │
-    ▼
-Step 3: Parse Patch Spec
-──────────────────────────
-patch.json:
+
+`rea` only emits two rules today: true self-moves and jumps to the immediately
+following instruction. Both are replaced with same-length NOPs, so no
+instruction moves and no relocation table is needed.
+
+The linear sweep is the main limitation. It decodes executable sections without
+building a control-flow graph, so a byte pattern inside embedded data can look
+like an instruction. That is why every candidate is reported with its address
+and why the tool never applies a patch without an explicit `--output`.
+
+## Patch spec and manifest
+
+A `PatchSpec` is the input to the patcher:
+
+```json
 {
   "schema_version": 1,
-  "patches": [{
-    "address": "0x109214b6",    ← Virtual Address
-    "expected": "55 8B EC 6A FF",
-    "replace": "90 90 90 90 90"
-  }]
+  "name": "rea-your-game",
+  "target_sha256": "...",
+  "allow_signed": false,
+  "patches": [
+    { "address": "0x140001000", "expected": "4889c0", "replace": "0f1f00", "note": "..." }
+  ],
+  "sections": []
 }
-    │
-    ▼
-Step 4: Resolve VA → File Offset
-──────────────────────────────────
-VA 0x109214b6:
-  RVA = VA - ImageBase = 0x109214b6 - 0x00400000 = 0x105214b6
-  → Matches .text section (VA=0x1000, VSize=0x246DC)
-  Wait, that's wrong. Let me recalculate.
-  
-  Actually: 0x109214b6 - 0x10900000 = 0x214b6 RVA
-  → In .text section (VA=0x10901000, so RVA range is 0x1000..0x256DC)
-  
-  File offset = section_raw_offset + (rva - section_va)
-              = 0x1000 + (0x214b6 - 0x1000)
-              = 0x1000 + 0x204b6
-              = 0x214b6
-              
-  Hmm, let me check the actual Deus Ex PE structure...
-  
-  Actually from objdump, .text starts at file offset 0x1000 with VA 0x10901000.
-  So RVA 0x214b6 maps to file offset:
-    0x1000 + (0x214b6 - 0x1000) = 0x214b6
-  
-  Wait, that's circular. Let me use the actual calculation:
-    RVA = VA - ImageBase = 0x109214b6 - 0x10900000 = 0x214b6
-    Section containing RVA 0x214b6: .text (VA=0x10901000)
-    Section RVA = 0x214b6 - 0x10901000 = 0x104b6
-    
-    Hmm, that's not right either. The actual RVA of the entry point should
-    be calculated as entry_va - image_base.
-    
-    Let me just use the tool's actual output:
-    - The patch was applied at file offset 0x214b6 (from the JSON report)
-    - This means RVA 0x214b6 is in section .text starting at RVA 0x1000
-    
-    File offset = SectionRawOffset + (RVA - SectionVA)
-                = 0x1000 + (0x214b6 - 0x1000)
-                = 0x214b6
-    
-    So the entry point RVA is 0x214b6, and the file offset is also 0x214b6
-    because the .text section starts at file offset 0x1000 and RVA 0x1000.
-    
-    Wait, that means RVA 0x214b6 - SectionVA 0x1000 = 0x204b6 offset in section
-    SectionRawOffset 0x1000 + 0x204b6 = 0x214b6 file offset.
-    
-    Yes! That matches the JSON report showing file_offset: 136374 = 0x214b6.
-
-    Actual calculation from the tool output:
-    - patch.address = 0x109214b6 (VA)
-    - patch.rva = 0x214b6 (RVA = VA - ImageBase where ImageBase = 0x10900000)
-    - patch.file_offset = 0x214b6 (offset in file where .text raw data starts is 0x1000, 
-                                     so 0x1000 + (0x214b6 - 0x1000) = 0x214b6)
-    - patch.section = ".text"
-    - patch.before_hex = "558bec6aff"
-    - patch.after_hex = "9090909090"
-
-    The tool successfully applied the patch.
-    │
-    ▼
-Step 5: Validate Patches
-──────────────────────────
-    ├─ Expected bytes match? YES (0x55 0x8B 0xEC 0x6A 0xFF at offset 0x214b6)
-    ├─ Target is executable? YES (.text section has EXECUTE flag)
-    ├─ Replace length == Expected length? YES (both 5 bytes)
-    └─ No overlaps? YES (only 1 patch)
-    │
-    ▼
-Step 6: Create Output
-──────────────────────
-    ├─ Copy game.exe → output buffer
-    ├─ Apply patches to buffer
-    │   buffer[0x214b6..0x214ba] = [0x90, 0x90, 0x90, 0x90, 0x90]
-    ├─ (Optional) Append new section if spec has "sections"
-    └─ Recompute PE checksum if non-zero
-    
-    Original file: UNCHANGED
-    Output buffer: PATCHED
-    │
-    ▼
-Step 7: Write Output Atomically
-─────────────────────────────────
-    ├─ Write to temp file: DeusEx.patched.exe.tmp-<pid>-<ns>
-    ├─ fsync
-    ├─ Rename to output path
-    └─ Read back and verify SHA-256
-    
-    If crash during write: temp file is orphaned, original output untouched
-    │
-    ▼
-Step 8: Write Manifest
-───────────────────────
-    ├─ Serialize PatchManifest to JSON
-    ├─ Write to temp file
-    ├─ fsync
-    └─ Rename to manifest path
-    
-    Manifest contains:
-    {
-      "schema_version": 1,
-      "tool_version": "0.1.0",
-      "created_unix_secs": 1730000000,
-      "input_path": "/tmp/mygame/DeusEx.exe",
-      "output_path": "/tmp/mygame/DeusEx.patched.exe",
-      "input_sha256": "3e6fdb89...",
-      "output_sha256": "4c62ef92...",
-      "patches": [{
-        "address": 278009014,
-        "rva": 136374,
-        "file_offset": 136374,
-        "section": ".text",
-        "before_hex": "558bec6aff",
-        "after_hex": "9090909090"
-      }],
-      "sections": []
-    }
-    │
-    ▼
-Done!
 ```
 
-## Data Flow: Reverting a Patch
+The patcher refuses to write when:
 
-```
-User runs:
-  game-opt-tool unpatch --manifest DeusEx.patched.exe.4c62ef92.patch.json
+- the input hash does not match `target_sha256`;
+- a patch address is outside a PE section;
+- the bytes at the address do not match `expected`;
+- the file is Authenticode-signed and `allow_signed` is false;
+- the output path aliases the spec, the manifest, or the input.
 
-Step 1: Load Manifest
-──────────────────────
-    ├─ Read JSON file
-    ├─ Deserialize PatchManifest
-    └─ Validate schema version = 1
-    │
+The manifest is the inverse operation: address, file offset, original bytes,
+replacement bytes, and both hashes. `unpatch` and `rea --revert` use it.
+
+## Backups
+
+Backups are stored next to the file: `<name>.<sha256-prefix>.<timestamp>.bak`
+with a matching `.bak.json` record. Restore verifies the backup checksum, writes
+through a temporary file, re-reads the result, and refuses if the target is a
+symlink or the backup no longer matches.
+
+## Optional measurement
+
+These paths are independent of REA and never feed automatic decisions:
+
+- `profiler/` parses MangoHud CSV files and computes averages, lows,
+  percentiles, and stutter ratio.
+- `sampler/` reads per-thread CPU time with `perf_event_open`, maps instruction
+  pointers through `/proc/<pid>/maps` to PE RVAs, and resolves names from a
+  cached Ghidra function list.
+- `decompiler/` runs `analyzeHeadless` and parses its output for one function at
+  a time.
+
+A CPU hotspot is not a frame-time verdict. `METRICS.md` explains why.
+
+## MCP server
+
+```text
+MCP client
+    │  JSON-RPC 2.0
+    ├── stdio (default)
+    └── HTTP POST http://127.0.0.1:<port>/mcp
     ▼
-Step 2: Verify Target Exists
-──────────────────────────────
-    ├─ Check target file exists
-    ├─ Check not a symlink
-    ├─ Check not a directory
-    └─ Check it's a regular file
-    │
-    ▼
-Step 3: Verify Target Integrity
-─────────────────────────────────
-    ├─ Read target file
-    ├─ Check size matches manifest.output_file_len
-    ├─ Compute SHA-256
-    ├─ Compare with manifest.output_sha256
-    │
-    │   If mismatch → REFUSE (file was corrupted or wrong file)
-    │
-    └─ Parse PE headers
-        ├─ Check number_of_sections matches manifest
-        ├─ Check size_of_code matches manifest
-        ├─ Check size_of_image matches manifest
-        ├─ Check checksum matches manifest
-        ├─ Check pe_offset matches manifest
-        ├─ Check optional_header_offset matches manifest
-        ├─ Check checksum_offset matches manifest
-        ├─ Check pe_is_64 matches manifest
-        ├─ Check pe_machine matches manifest
-        ├─ Check entry_point_rva matches manifest
-        └─ Check optional_header_size matches manifest
-        
-        If any mismatch → REFUSE (PE headers were tampered)
-    │
-    ▼
-Step 4: Restore Original Bytes
-───────────────────────────────
-    ├─ Create mutable copy of target file
-    ├─ For each patch in manifest.patches:
-    │   ├─ Parse before_hex → bytes
-    │   ├─ Parse after_hex → bytes
-    │   ├─ Verify before.len() == after.len()
-    │   ├─ Verify restored[offset..offset+len] == after (current bytes match)
-    │   └─ Write before bytes to offset
-    │
-    ├─ For each section in manifest.sections:
-    │   ├─ Parse header_before_hex → bytes
-    │   ├─ Parse header_after_hex → bytes
-    │   ├─ Verify restored[header_offset..header_offset+40] == after
-    │   └─ Write before bytes to header_offset
-    │
-    ├─ If no sections:
-    │   └─ Restore checksum to manifest.checksum_before
-    │
-    ├─ If sections existed:
-    │   ├─ Restore number_of_sections to manifest.number_of_sections_before
-    │   ├─ Restore size_of_code to manifest.size_of_code_before
-    │   ├─ Restore size_of_image to manifest.size_of_image_before
-    │   └─ Restore checksum to manifest.checksum_before
-    │
-    └─ Truncate file to manifest.original_file_len
-    │
-    ▼
-Step 5: Verify Restoration
-───────────────────────────
-    ├─ Compute SHA-256 of restored file
-    ├─ Compare with manifest.input_sha256
-    │
-    │   If mismatch → REFUSE (restoration failed)
-    │
-    └─ Success!
-    │
-    ▼
-Step 6: Write Atomically
-─────────────────────────
-    ├─ Write to temp file
-    ├─ fsync
-    └─ Rename to target path
-    │
-    ▼
-Done! File is now byte-for-byte identical to original.
-```
-
-## Backup System Internals
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                     BACKUP FILE STRUCTURE                           │
-│                                                                     │
-│  Original:  DeusEx.exe                                              │
-│                                                                     │
-│  After 'backup --game DeusEx.exe':                                  │
-│                                                                     │
-│  ├── DeusEx.exe                          (original, unchanged)      │
-│  ├── DeusEx.exe.3e6fdb89b880a60e.123456.bak    (exact copy)        │
-│  └── DeusEx.exe.3e6fdb89b880a60e.123456.bak.json (manifest)        │
-│                                                                     │
-│  Manifest content:                                                  │
-│  {                                                                  │
-│    "version": 1,                                                    │
-│    "original_path": "/tmp/mygame/DeusEx.exe",                       │
-│    "backup_path": "/tmp/mygame/DeusEx.exe.3e6fdb89b880a60e.123456.bak", │
-│    "sha256": "3e6fdb89b880a60ee984b885a48f262070019572f1531ed70d96108781bae00e", │
-│    "size": 253952,                                                  │
-│    "created_unix_secs": 1730000000,                                 │
-│    "created_unix_nanos": 123456789                                  │
-│  }                                                                  │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-## File Naming Conventions
-
-| File | Pattern | Purpose |
-|------|---------|---------|
-| Backup | `<name>.<sha256-prefix-16>.<nanos>.bak` | Exact copy of original |
-| Backup manifest | `<name>.<sha256-prefix-16>.<nanos>.bak.json` | Metadata for restore |
-| Patch output | `<name>.exe` | Patched binary |
-| Patch manifest | `<name>.exe.<output-sha256-prefix-16>.patch.json` | Rollback record |
-
-## Error Handling Strategy
-
-| Error | Handling |
-|-------|----------|
-| Expected bytes don't match | Fail before writing, no output created |
-| Target file corrupted | Fail with clear message, no changes made |
-| Disk full during write | Temp file orphaned, original untouched |
-| SHA-256 mismatch on restore | Fail with clear message, file unchanged |
-| Symlink detected | Fail with message, no write |
-| Signed PE (default) | Fail, suggest `allow_signed: true` |
-| Missing backup for in-place | Fail, suggest running `backup --game` first |
-
-## CPU Sampling Architecture
-
-`sample` is a Linux-only path that answers "where did this process spend CPU
-time?" It does not use the `perf` binary and does not require root at
-`perf_event_paranoid=2`.
-
-```
-game path + optional pid/process
-        │
-        ▼
-/proc/<pid>/maps ──► find the mapping for the PE ──► runtime base + image size
-        │
-        ▼
-for each thread: perf_event_open(PERF_TYPE_SOFTWARE,
-                                 PERF_COUNT_SW_CPU_CLOCK,
-                                 exclude_kernel=1, inherit=0)
-        │
-        ▼
-ring buffer ──► sample records (instruction pointer)
-        │
-        ▼
-IP - runtime base + image base ──► PE RVA
-        │
-        ├── outside the PE ──► external samples (Wine/ntdll/driver/OS)
-        └── inside the PE
-                ├── Ghidra function map hit ──► per-function self time
-                └── gap ──► unknown in-game samples
-        │
-        ▼
-bounded SampleReport: top functions/offsets, game/external/unknown,
-lost/overwritten counts, warnings
-```
-
-Implementation notes:
-
-- One event per thread with `inherit=0`; on this kernel `inherit=1` fails the
-  ring-buffer mmap with `EINVAL`.
-- User-space only: kernel time, blocked time, and GPU time are not sampled.
-- Function names come from a Ghidra function list cached by canonical path,
-  file size, and mtime; `--no-ghidra` reports raw RVAs.
-- The report is self CPU time, not inclusive/call-graph attribution.
-- Non-Linux builds return a clear unsupported error instead of failing to
-  compile.
-
-## MCP Architecture
-
-```
-agent (OpenCode / Claude Code / other MCP client)
-        │  JSON-RPC 2.0
-        ├── stdio (default)
-        └── HTTP POST http://127.0.0.1:<port>/mcp (--transport http)
-        ▼
 mcp-server ──► same validated command handlers as the CLI
-        │
-        ├── response JSON is capped at 60 KB by default
-        │   (GAME_OPT_MCP_MAX_BYTES, 4 KB–1 MB)
-        ├── oversized output becomes a truncation envelope with a preview
-        ├── decompile returns 24 KB pseudocode pages; assembly is opt-in
-        └── list_functions returns address/name/size handles only
 ```
 
-Eleven tools: `game_info`, `decompile`, `list_functions`, `sample`, `profile`,
-`compare`, `patch`, `unpatch`, `backup`, `backup_verify`, `verify`. The MCP
-server never exposes raw shell access; stdout is protocol-only and logs go to
-stderr.
+Responses are capped at 60 KB by default (`GAME_OPT_MCP_MAX_BYTES`, 4 KB–1 MB).
+Oversized output becomes a truncation envelope with a preview. The server never
+exposes raw shell access; stdout is protocol-only and logs go to stderr.
 
-## Security Model
+## Security boundaries
 
-1. **Input validation**: All user-provided values (addresses, bytes, paths) are validated before use.
-2. **Bounds checking**: All file offsets are checked against file length.
-3. **Cryptographic verification**: SHA-256 guards every critical transition.
-4. **Symlink refusal**: Prevents accidental writes to arbitrary files.
-5. **Atomic writes**: Prevents corruption on crash.
-6. **Expected bytes**: Patches refuse to apply if the target bytes have changed.
-
+1. All user-provided addresses, bytes, and paths are validated before use.
+2. File offsets are checked against the actual file length.
+3. SHA-256 guards every backup, patch, and restore transition.
+4. Symlinks are refused as patch, backup, and restore targets.
+5. Writes are atomic (temp file, `fsync`, rename).
+6. The tool never downloads, phones home, or escalates privileges.

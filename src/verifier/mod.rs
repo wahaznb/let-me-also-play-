@@ -123,6 +123,7 @@ impl Verifier {
     }
 
     /// Render a verification report as text.
+    #[allow(dead_code)]
     pub fn generate_report(&self, report: &VerificationReport) -> String {
         let mut output = String::new();
         output.push_str("=== Verification Report ===\n\n");

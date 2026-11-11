@@ -168,7 +168,7 @@ fn classify_jmp(insn: &DecodedInsn, next_ip: u64) -> Option<(CandidateKind, Vec<
     }
     let replacement = nops_n(insn.len);
     let reason = format!(
-        "jmp to the immediately following instruction (0x{next_ip:X}); removed {} byte(s)",
+        "jmp to the immediately following instruction (0x{next_ip:X}); replaced with {} nop byte(s)",
         insn.len
     );
     Some((CandidateKind::DeadJump, replacement, reason))

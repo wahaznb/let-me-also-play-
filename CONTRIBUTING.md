@@ -1,76 +1,112 @@
-# Contributing to Game Opt Tool
+# Contributing
 
-Thanks for wanting to help! This document outlines how to contribute.
+Thanks for taking a look. This is a small tool with a narrow scope, and that is
+intentional.
 
-## Code of Conduct
+## Before you start
 
-- Be respectful and inclusive
-- Help others learn
-- Focus on preservation and education
-- No piracy encouragement
+- Read [README.md](README.md) and [docs/rea.md](docs/rea.md).
+- Only work with binaries you own and are allowed to modify.
+- No DRM circumvention, no multiplayer/anti-cheat targets, no game assets.
 
-## Getting Started
+## Setup
 
-1. Fork the repo
-2. Clone your fork
-3. Run `./setup.sh`
-4. Read [ARCHITECTURE.md](docs/architecture.md)
-5. Pick an issue from the tracker
-
-## Project Structure
-
-```
-game-opt-tool/
-├── src/
-│   ├── profiler/       # Benchmarking & profiling
-│   ├── decompiler/     # Ghidra integration
-│   ├── optimizer/      # Code optimization engine
-│   ├── patcher/        # Binary patching
-│   ├── verifier/       # Verification & testing
-│   └── cli/            # Command-line interface
-├── targets/            # Game-specific configs
-├── config/             # Configuration files
-└── docs/               # Documentation
+```bash
+git clone https://github.com/wahaznb/let-me-also-play-.git
+cd let-me-also-play-
+cargo build --release --bins
+cargo test
 ```
 
-## Adding a New Game Target
+Ghidra and JDK 25 are optional; only the decompiler and function naming need
+them. See [INSTALL.md](INSTALL.md).
 
-1. Create a directory in `targets/<game-name>/`
-2. Add `config.yaml` with:
-   - Binary format (PE, ELF, Mach-O)
-   - Architecture (x86, x86-64, ARM)
-   - Known hot functions
-   - Quirks to preserve
-3. Add `patches/` with any pre-built patches
-4. Update `config/games.yaml` to include the game
-5. Submit a PR
+## Layout
 
-## Testing
+```text
+src/
+├── rea/          static analysis: decode, candidates, patch specs
+├── patcher/      PE patching, expected-byte guards, manifests
+├── backup/       SHA-256 backups and restores
+├── decompiler/   Ghidra headless runner
+├── sampler/      Linux perf_event_open sampling
+├── profiler/     MangoHud CSV frame-time math
+├── mcp/          MCP server (stdio + HTTP)
+└── config/       config/games.yaml parsing
+config/           game metadata
+docs/             protocol and workflow notes
+tests/            CLI-level integration tests
+```
 
-Run tests before submitting:
+## What fits
+
+- A new provably safe, length-preserving candidate rule for `rea`.
+- A bug fix in patching, backup, revert, or manifest handling.
+- A test that demonstrates a real failure.
+- Documentation corrections where the code and the text disagree.
+
+## What does not fit
+
+- Optimizer passes that estimate speedups without measurements.
+- Features that claim a performance win the tool cannot verify.
+- Anything that patches a running game's memory, bypasses DRM, or targets
+  multiplayer.
+- Large rewrites of working code without a concrete failing case.
+
+## Tests
+
 ```bash
 cargo test
-cargo clippy
+cargo clippy --all-targets
 ```
 
-## Commit Style
+The suite runs without a game. The one ignored test needs a real binary,
+Ghidra, and JDK 25:
+
+```bash
+export GAME_OPT_TEST_BINARY="/path/to/your/game/DeusEx.exe"
+cargo test --test cli_decompile -- --ignored
+```
+
+If you change the patch path, add a test that proves the change is reversible
+and that a guard mismatch is refused.
+
+## Adding a game
+
+REA does not need a per-game entry. If you only want metadata, add a block to
+`config/games.yaml`:
+
+```yaml
+games:
+  my-game:
+    name: "My Game"
+    version: "1.0"
+    engine: "Unknown"
+    binary_format: PE
+    architecture: X64
+    hot_functions: []
+    quirks: []
+    optimization_hints: {}
+```
+
+Do not add guessed addresses or function names. Addresses come from `rea` or
+`decompile`, and they belong in a patch spec, not in a static table.
+
+## Commits
 
 Use conventional commits:
-- `feat:` — New feature
-- `fix:` — Bug fix
-- `docs:` — Documentation
-- `refactor:` — Code restructuring
-- `test:` — Tests
-- `chore:` — Maintenance
 
-## Legal Guidelines
+- `feat:` new behavior
+- `fix:` bug fix
+- `docs:` documentation
+- `refactor:` restructuring without behavior change
+- `test:` tests
+- `chore:` maintenance
 
-Remember:
-- Only work on games users own
-- No DRM circumvention
-- Single-player only
-- No distribution of game assets
+Keep the subject under about 72 characters and explain *why* in the body when
+the change is not obvious.
 
-## Questions?
+## License
 
-Open an issue or join our Discord.
+By contributing, you agree that your contribution is licensed under the MIT
+license in [LICENSE](LICENSE).

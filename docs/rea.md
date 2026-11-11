@@ -1,6 +1,7 @@
 # Reverse-Engineering Analysis (REA)
 
-Static binary analysis for game executables — **no measurement, no running the game**.
+Static binary analysis for game executables — **no measurement, no running the
+game**.
 
 ## What it does
 
@@ -12,7 +13,7 @@ Static binary analysis for game executables — **no measurement, no running the
    A 32-bit self-move in 64-bit mode (`mov eax, eax`) is **not** treated as
    dead: it zeroes the upper 32 bits of `RAX`, so removing it can change the
    register's value.
-3. **Emits** a JSON patch spec you can apply with the verified Patcher.
+3. **Emits** a JSON patch spec you can apply with the verified patcher.
 4. **Tracks** every change in a manifest so you can revert exactly.
 
 REA intentionally does **not** rewrite `test reg,reg` or `and reg,reg` into
@@ -21,12 +22,15 @@ not behavior-preserving.
 
 ## Why no measurement?
 
-This tool doesn't run the game or touch MangoHud. It only finds candidates that are *provably* safe based on instruction semantics. You decide whether to keep them by playing the game or profiling yourself.
+The tool does not run the game or consume MangoHud data here. It only reports
+candidates that are provably safe from instruction semantics. Whether a
+candidate is worth keeping is your decision, and the optional `profile`,
+`sample`, and `compare` commands are separate from this loop.
 
 ## Usage
 
 ```bash
-# Scan only (no patch written); --json for agents
+# Scan only (nothing is written)
 game-opt-tool rea --game <path_to_game.exe>
 game-opt-tool rea --game <path_to_game.exe> --json
 
@@ -44,10 +48,10 @@ game-opt-tool rea --game ./patched.exe \
 
 ## Output example
 
-```
+```text
 === REA: static analysis ===
-Game:       Mortal Shell
-Executable: /games/Mortal Shell/Dungeonhaven-Win64-Shipping.exe
+Game:       Your Game
+Executable: /path/to/game/Game.exe
 Format:     PE
 Arch:       x64
 
@@ -56,20 +60,22 @@ Arch:       x64
 
 Candidates (2):
   0x14001A2B3  dead_move    mov rax, rax is a no-op move; replaced with 3 nop byte(s)
-  0x14001C441  dead_jump    jmp to the immediately following instruction (0x14001C444); removed 2 byte(s)
+  0x14001C441  dead_jump    jmp to the immediately following instruction (0x14001C444); replaced with 2 nop byte(s)
   ...
 ```
 
 ## Safety guarantees
 
 - Every candidate is length-preserving (original bytes == replacement bytes).
-- The verified Patcher writes atomically via temp + rename.
-- A SHA-256 manifest records every byte change; `unpatch` restores the exact original.
-- REA always emits `allow_signed: false`, so the Patcher refuses an Authenticode-signed PE unless you edit the spec yourself.
+- The verified patcher writes atomically via temp file + rename.
+- A SHA-256 manifest records every byte change; `unpatch` restores the exact
+  original.
+- REA always emits `allow_signed: false`, so the patcher refuses an
+  Authenticode-signed PE unless you edit the spec yourself.
 
 ## Limitations
 
-- Only PE binaries supported today.
+- Only PE binaries are supported today.
 - Only x86/x86-64 instruction decoding.
 - The sweep is linear, not control-flow-aware. Embedded data can decode as
   instructions and produce a false-positive candidate; the expected-byte guard

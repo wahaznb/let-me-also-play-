@@ -8,7 +8,6 @@ use std::path::Path;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub games: HashMap<String, GameConfig>,
-    pub optimizations: Vec<OptimizationPass>,
     pub quirks: QuirkDatabase,
 }
 
@@ -21,17 +20,17 @@ pub struct GameConfig {
     pub binary_format: BinaryFormat,
     pub architecture: Architecture,
 
-    /// Known hot functions to optimize
+    /// Functions you have identified as interesting
     pub hot_functions: Vec<FunctionTarget>,
 
     /// Known quirks that must be preserved
     pub quirks: Vec<Quirk>,
 
-    /// Optimization hints for this game
+    /// Free-form notes for this game
     pub optimization_hints: HashMap<String, String>,
 }
 
-/// A function to optimize
+/// A function of interest in a game binary
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionTarget {
     pub name: String,
@@ -100,15 +99,6 @@ impl std::fmt::Display for Architecture {
     }
 }
 
-/// An optimization pass to apply
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OptimizationPass {
-    pub name: String,
-    pub description: String,
-    pub enabled: bool,
-    pub parameters: HashMap<String, String>,
-}
-
 impl Config {
     /// Load configuration from file, choosing the parser by extension.
     pub fn load(path: &Path) -> Result<Self, anyhow::Error> {
@@ -130,7 +120,10 @@ impl Config {
         }
     }
 
-    /// Save configuration to file, choosing the serializer by extension.
+    /// Save the configuration, choosing the serializer by extension.
+    ///
+    /// Kept for round-tripping a config you edited in code or in tests.
+    #[allow(dead_code)]
     pub fn save(&self, path: &Path) -> Result<(), anyhow::Error> {
         let extension = path
             .extension()
@@ -155,6 +148,8 @@ impl Config {
     }
 
     /// Get game config by key or display name, tolerating punctuation and case.
+    /// Look up a game by key or display name.
+    #[allow(dead_code)]
     pub fn get_game(&self, name: &str) -> Option<&GameConfig> {
         self.find_game(name)
     }
@@ -185,18 +180,12 @@ impl Config {
             })
             .map(|(_, game)| game)
     }
-
-    /// Get quirks for a game
-    pub fn get_quirks(&self, game: &str) -> &[Quirk] {
-        self.quirks.games.get(game).map(|v| v.as_slice()).unwrap_or(&[])
-    }
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             games: HashMap::new(),
-            optimizations: vec![],
             quirks: QuirkDatabase {
                 games: HashMap::new(),
             },
@@ -221,13 +210,10 @@ mod tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/games.yaml");
         let config = Config::load(&path).expect("config/games.yaml must parse");
 
-        let oblivion = config
-            .games
-            .get("oblivion-remastered")
-            .expect("oblivion entry");
-        assert_eq!(oblivion.architecture, Architecture::X64);
-        assert!(!oblivion.hot_functions.is_empty());
-        assert!(!oblivion.quirks.is_empty());
+        let deus_ex = config.games.get("deus-ex").expect("deus-ex entry");
+        assert_eq!(deus_ex.architecture, Architecture::X86);
+        assert_eq!(deus_ex.binary_format, BinaryFormat::PE);
+        assert!(deus_ex.hot_functions.is_empty());
         assert!(config.quirks.games.is_empty());
     }
 
@@ -235,9 +221,9 @@ mod tests {
     fn get_game_is_case_insensitive() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/games.yaml");
         let config = Config::load(&path).unwrap();
-        assert!(config.get_game("Oblivion Remastered").is_some());
-        assert!(config.get_game("oblivion-remastered").is_some());
-        assert!(config.get_game("OBLIVION-REMASTERED").is_some());
+        assert!(config.get_game("Deus Ex").is_some());
+        assert!(config.get_game("deus-ex").is_some());
+        assert!(config.get_game("DEUS-EX").is_some());
         assert!(config.get_game("does-not-exist").is_none());
     }
 

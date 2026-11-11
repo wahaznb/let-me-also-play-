@@ -68,7 +68,6 @@ pub struct RestoreReport {
     pub after_hash: String,
     /// True when the target already matched the backup.
     pub already_restored: bool,
-    pub dry_run: bool,
 }
 
 /// Create a new backup of `path`. Never overwrites an existing backup.
@@ -286,7 +285,6 @@ pub fn restore(
             before_hash,
             after_hash: sha256_hex(&bytes),
             already_restored,
-            dry_run: true,
         });
     }
 
@@ -322,7 +320,6 @@ pub fn restore(
         before_hash,
         after_hash,
         already_restored,
-        dry_run: false,
     })
 }
 
@@ -621,7 +618,7 @@ mod tests {
         write_file(&target, b"patched");
 
         let report = restore(&target, None, true).unwrap();
-        assert!(report.dry_run);
+        assert!(!report.already_restored);
         assert_eq!(fs::read(&target).unwrap(), b"patched");
     }
 

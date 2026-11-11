@@ -1,91 +1,148 @@
-# Installation Guide
+# Installation
 
-## Quick Start
+## Requirements
 
-### Prerequisites
-- Rust 1.80+ (install from https://rustup.rs/)
-- Git
+- **Rust 1.80 or newer** (`std::sync::LazyLock` is used).
+- **Linux, macOS, or Windows.** Development and testing happen on Linux
+  (x86_64); the Windows and macOS jobs in CI compile the same code.
+- **Write permission to the directory that holds the executable** if you use
+  `backup`, `revert`, or `--output` next to the game. Backups live beside the
+  file they protect, so restoring never depends on a database.
 
-### Build from Source
+No root, no network access at runtime, and no telemetry. The tool never
+downloads anything on its own.
+
+## Build
+
 ```bash
-git clone <your-repo>
-cd game-opt-tool
-cargo build --release
+git clone https://github.com/wahaznb/let-me-also-play-.git
+cd let-me-also-play-
+cargo build --release --bins
 ```
 
-The binary will be at `target/release/game-opt-tool`.
+The binary is `target/release/game-opt-tool`.
 
-### Usage
+## First check
+
+`doctor` inspects the config, the optional external tools, and the directory you
+intend to work in. It does not need a game.
+
 ```bash
-# Create a backup
-./target/release/game-opt-tool backup --game /path/to/game.exe
-
-# Apply a patch
-./target/release/game-opt-tool patch --game game.exe --output patched.exe --spec patch.json
-
-# Revert a patch
-./target/release/game-opt-tool unpatch --manifest patched.exe.*.patch.json
-
-# Sample CPU time per function while the game runs (Linux)
-./target/release/game-opt-tool sample --game game.exe --duration 20 --top 20
+./target/release/game-opt-tool doctor
+./target/release/game-opt-tool doctor --game "/path/to/your/game/Game.exe"
 ```
 
-## Optional: Decompilation and Function Names
+## Optional: decompilation
 
-To use `decompile`, `list_functions`, or name resolution in `sample`, you need:
+`decompile`, `list_functions`, and function naming in `sample` need Ghidra and
+a full JDK. Ghidra 12.2 is built against **Java 25**; a JRE or JDK 21 is
+rejected, and `$JAVA_HOME/bin/javac` must exist.
 
-1. **JDK 25** (full JDK, not JRE)
-   - Download from https://adoptium.net/
-   - Extract to a permanent location (not /tmp)
-
-2. **Ghidra 12.2**
-   - Download from https://ghidra-sre.org/
-   - Extract to a permanent location
-
-3. **Set environment variables:**
-   ```bash
-   export JAVA_HOME=/path/to/jdk25
-   export GHIDRA_INSTALL_DIR=/path/to/ghidra
-   ```
-
-Then:
 ```bash
-./target/release/game-opt-tool decompile --game game.exe
+export JAVA_HOME="$HOME/.local/opt/jdk-25.0.5+8"
+export PATH="$JAVA_HOME/bin:$PATH"
+export GHIDRA_INSTALL_DIR="$HOME/.local/opt/ghidra_12.2_PUBLIC"
 ```
 
-## Platform Notes
+`GHIDRA_INSTALL_DIR` must point at the Ghidra root that contains
+`support/analyzeHeadless`, not at `support` itself.
+
+Download links:
+
+- JDK 25: <https://adoptium.net/>
+- Ghidra 12.2: <https://github.com/NationalSecurityAgency/ghidra/releases>
+
+Extract both somewhere permanent (not `/tmp`). `doctor` reports whether the
+paths are usable; missing Ghidra is a warning, not a failure.
+
+## Optional: CPU sampling
+
+`sample` is Linux-only. It calls `perf_event_open` directly and does not need
+the `perf` binary or `sudo`.
+
+| Requirement | Detail |
+|---|---|
+| Linux with `perf_event_open` | x86_64 tested |
+| `perf_event_paranoid <= 2` | 1 or 2 works unprivileged; 3 and 4 deny it |
+| Same user as the game | The sampler reads `/proc/<pid>/maps` |
+| Running game | It samples an existing process, it does not launch one |
+| Ghidra + JDK (optional) | Only for function names; `--no-ghidra` prints raw RVAs |
+
+```bash
+cat /proc/sys/kernel/perf_event_paranoid
+./target/release/game-opt-tool doctor
+```
+
+## Optional: frame-time logs
+
+`profile` and `compare` read MangoHud CSV files that you capture yourself. On
+Linux this works for native games and for Windows games under Wine:
+
+```bash
+MANGOHUD_CONFIG="output_folder=/tmp/mangohud,autostart_log=1,log_duration=0" \
+  mangohud --dlsym wine Game.exe
+```
+
+`log_duration=0` logs until the game exits. Use the `mangohud` wrapper rather
+than setting `MANGOHUD=1` by hand.
+
+## Platform notes
 
 ### Linux
-- Backup/patch commands work immediately after building
-- CPU sampling needs `perf_event_open` access for your user; check
-  `/proc/sys/kernel/perf_event_paranoid` (1 or 2 works without root) and run
-  `game-opt-tool doctor` to see the probe result
-- MangoHud optional for frame profiling (sudo pacman -S mangohud)
-- Wine optional for running Windows games
+
+Everything works after `cargo build`. Wine and MangoHud are only needed for
+measurement, not for the static REA loop.
 
 ### Windows
-- Close the game before patching (file locking)
-- Use a writable directory (not Program Files)
-- Antivirus may flag patched executables
-- `sample` is Linux-only; it returns an unsupported error on Windows
 
-## Storage Requirements
+- Build with `cargo build --release` in a normal terminal; no admin required.
+- Windows locks executables that are running. Close the game before backing up
+  or patching.
+- Work in a normal folder such as `C:\Users\you\games\`, not `Program Files`.
+- Antivirus software may flag a patched executable. Exclude your work folder if
+  you trust the changes you made.
+- `sample` returns an unsupported-platform error on Windows.
 
-| Component | Size |
-|-----------|------|
+### macOS
+
+The code compiles for x86_64 and Apple Silicon. `sample` is gated to Linux and
+returns a clear error instead of failing to build. Ghidra and the backup/patch
+commands work the same way as on Linux.
+
+### Cross-compiling
+
+```bash
+# Windows GNU target from Linux (needs mingw-w64 to link)
+rustup target add x86_64-pc-windows-gnu
+cargo build --release --target x86_64-pc-windows-gnu
+
+# macOS
+rustup target add x86_64-apple-darwin
+cargo build --release --target x86_64-apple-darwin
+```
+
+CI builds Windows (MSVC and GNU), Linux, and macOS artifacts on every push.
+
+## Common problems
+
+| Symptom | Fix |
+|---|---|
+| `cargo: command not found` | Install Rust from <https://rustup.rs/> and open a new shell. |
+| `doctor` says the backup directory is not writable | Work on a copy in a writable folder, or fix permissions. |
+| `Backup checksum mismatch` | The `.bak` file was modified. Restore refuses on purpose; use another backup. |
+| `Refusing to restore ... symbolic link` | Point the command at the real file, not a symlink. |
+| `Ghidra not found` | Set `GHIDRA_INSTALL_DIR` to the directory containing `support/analyzeHeadless`. |
+| `Ghidra rejected the configured Java` | Use a full JDK 25; check that `$JAVA_HOME/bin/javac` exists. |
+| `Ghidra produced no decompilation result` | The address may not be a function. Try a known address with `--address`. |
+| `perf_event_open` permission denied | Lower `perf_event_paranoid` to 2 or less, or use your distribution's `perf` capability setup. |
+| `No MangoHud CSV logs found` | Check that the log folder contains a CSV with an `fps` or `frametime` header. |
+
+## Storage
+
+| Item | Size |
+|---|---|
 | Tool binary | ~3 MB |
-| Backup (.bak) | Same as game exe |
-| Manifest (.json) | 1-2 KB |
-| Ghidra (optional) | ~900 MB |
-| JDK (optional) | ~300 MB |
-
-## Troubleshooting
-
-| Problem | Solution |
-|---------|----------|
-| `command not found: cargo` | Install Rust from rustup.rs |
-| `Java not found` | Set JAVA_HOME environment variable |
-| `Ghidra not found` | Set GHIDRA_INSTALL_DIR environment variable |
-| `Permission denied` | Copy game to a writable directory |
-| `File locked` | Close the game before patching |
-
+| Backup (`.bak`) | Same size as the executable |
+| Patch manifest | 1–2 KB |
+| Ghidra (optional) | ~1.5 GB |
+| JDK 25 (optional) | ~300 MB |

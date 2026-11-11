@@ -1,76 +1,42 @@
-# Legal Guidelines
+# Legal and responsible use
 
-## What This Tool Is
+This project is for personal experimentation on single-player games you already
+own. It is not legal advice.
 
-This tool helps you **optimize games you already own**. It reverse engineers your game's binary, identifies performance bottlenecks, and replaces slow code with faster implementations — all while preserving the original look and feel.
+## What the tool does
 
-## What This Tool Is NOT
+It reads a local executable, reports static candidates, and can apply a guarded
+byte patch to a copy. It does not decrypt, unprotect, or redistribute anything.
 
-- **Not a piracy tool** — We don't distribute game files, assets, or cracked versions
-- **Not a cheat engine** — We don't help you gain unfair advantages in multiplayer
-- **Not a DRM circumvention tool** — We work on unencrypted binaries only
+## Ground rules
 
-## Legal Basis
+1. **Own the game.** Use a legally obtained copy.
+2. **Personal use only.** Do not distribute patched executables.
+3. **No game assets.** Do not redistribute textures, models, audio, or data.
+4. **Single-player only.** Do not use it on multiplayer games, especially ones
+   with anti-cheat. Modified binaries are detectable and can get you banned.
+5. **No DRM circumvention.** If a binary is encrypted or protected, stop.
 
-### Fair Use (US)
-Under US copyright law, reverse engineering for interoperability and preservation is protected under fair use. Key precedents:
-- **Sony v. Connectix (2000)** — Reverse engineering for interoperability is fair use
-- **Sega v. Accolade (1992)** — Disassembly is permissible to access unprotectable elements
+## Reverse engineering is jurisdiction-specific
 
-### DMCA Considerations
-Section 1201 of the DMCA prohibits circumventing technological measures that control access. **This tool does not circumvent DRM.** We work on binaries that are already accessible to the user.
+Some jurisdictions recognize reverse engineering for interoperability,
+security research, or preservation. Others restrict it, and most game EULAs
+prohibit it even where the law is permissive. Whether a particular use is
+lawful depends on where you are and what you agreed to. If that matters for
+your situation, ask a lawyer rather than relying on this file.
 
-If a game has DRM/encryption:
-- Do not use this tool to bypass it
-- Focus on games without DRM or with DRM already removed by the community
+The tool includes no DRM bypass and no code for defeating integrity checks. It
+refuses signed PE binaries by default because patching them would invalidate the
+signature.
 
-### EULA/ToS
-Most games have EULAs prohibiting reverse engineering. However:
-- EULAs are contracts, not law
-- Courts have increasingly ignored shrinkwrap licenses
-- Consumer protection laws often override EULA restrictions
-- No one enforces EULAs against individual users for personal optimization
+## Anti-cheat
 
-## Your Responsibilities
+Do not use this tool on games with Easy Anti-Cheat, BattlEye, Vanguard, or any
+similar system. Even a harmless byte change is a modified binary, and anti-cheat
+software is designed to react to that.
 
-When using this tool, you must:
+## No warranty
 
-1. **Own the game** — You must have legally obtained a copy
-2. **Use it personally** — Don't distribute your patched binaries
-3. **Don't share assets** — Only optimize code, never redistribute textures/models/audio
-4. **Single-player only** — Don't use on multiplayer games (anti-cheat risk)
-5. **No DRM bypass** — Don't use this tool to circumvent encryption
-
-## What Happens If You Follow These Rules?
-
-**Nothing bad.** You're in the same position as:
-- People who use mods to fix game bugs
-- People who use translation patches
-- People who use performance patches (like the Oblivion Performance Fix)
-
-**Nobody has been prosecuted** for optimizing their own games. The legal risk is theoretical, not practical.
-
-## What About Anti-Cheat?
-
-**Do not use this tool on games with anti-cheat.** Even if you're just optimizing, anti-cheat systems will detect modified binaries and ban you.
-
-**Safe games:**
-- Single-player games without anti-cheat
-- Older games (pre-2015) with weak or no protection
-- Games with active modding communities
-
-**Unsafe games:**
-- Games with Easy Anti-Cheat
-- Games with BattlEye
-- Games with Riot Vanguard
-- Most modern competitive multiplayer games
-
-## Need Legal Advice?
-
-This is not legal advice. If you have specific legal concerns, consult an attorney specializing in copyright and reverse engineering.
-
-## References
-
-- [DMCA Section 1201](https://www.law.cornell.edu/uscode/text/17/1201)
-- [Sony v. Connectias case summary](https://en.wikipedia.org/wiki/Sony_Computer_Entertainment,_Inc._v._Connectix_Corp.)
-- [Sega v. Accolade case summary](https://en.wikipedia.org/wiki/Sega_Industries,_Inc._v._Accolade,_Inc.)
+The software is provided under the MIT license, without warranty. A patch can
+break a game, corrupt a save, or change behavior in ways static analysis cannot
+predict. Keep the original file and the manifest, and test on a copy.

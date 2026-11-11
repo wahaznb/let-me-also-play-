@@ -1,24 +1,27 @@
-# Deus Ex (2000) Target Configuration
+# Deus Ex (2000)
 
-This module contains configuration and hot function information for the Deus Ex (2000) game binary.
+Deus Ex is the reference target for this tool. It is a 32-bit x86 Windows
+executable (PE32), which makes it a good sanity check for format detection,
+backup/restore, and Ghidra decompilation.
 
-## Known Hot Functions
+## What is verified
 
-- `npc_ai_update` - Non-player character AI update loop (High impact)
-- `physics_step` - Physics simulation step (High impact)
-- `pathfinding` - Navmesh pathfinding resolution (Medium impact)
-- `render_submit` - Render submission thread (Low impact)
+- Format detection: PE32 / x86.
+- Entry point reported by the tool matches the real executable.
+- Ghidra headless decompilation of the entry point (`0x109214B6` in the GOG
+  build used for testing).
+- Backup, revert, and byte-level patching on a copy.
 
-## Optimization Passes
+## What is not claimed
 
-- `loop_unrolling` - Unroll tight AI loops
-- `simd_vectorization` - Vectorize physics math operations
-- `cache_friendly_layout` - Reorder pathfinding data for cache locality
-- `constant_folding` - Fold constant expressions
-- `dead_code_elimination` - Remove unreachable code paths
-- `function_inlining` - Inline small helper functions
+There is no verified list of hot functions for this game in this repository.
+Names like "AI update" or "physics step" would be guesses until they are
+measured or read in the decompiler. Use `sample` while the game runs, or
+`decompile --address <hex>` on an address you found with `rea`.
 
-## Quirks to Preserve
+## Notes
 
-- `ai_frame_timing` - AI frame timing must not be altered
-- `physics_substep_order` - Physics substep order must be preserved
+- Start the game from its `System` directory so it can find its data files.
+- The engine is Unreal Engine 1; the original source is publicly available and
+  useful when reading decompiled output.
+- Single-player only. Do not point this tool at a multiplayer install.

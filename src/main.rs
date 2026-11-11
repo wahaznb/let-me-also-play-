@@ -1,15 +1,13 @@
 //! Game Opt Tool — Main entry point
 //!
-//! A tool that reverse engineers and optimizes game binaries
-//! to improve performance while preserving the original behavior.
+//! Static analysis and reversible byte patching for single-player game
+//! executables. Every change is guarded by the scanned bytes and recorded in a
+//! manifest that can undo it exactly.
 
-#[allow(dead_code)]
-mod cli;
 mod config;
 mod game;
 mod profiler;
 mod decompiler;
-mod optimizer;
 mod patcher;
 mod verifier;
 mod backup;
@@ -32,7 +30,7 @@ use tracing_subscriber::EnvFilter;
 #[command(name = "game-opt-tool")]
 #[command(version)]
 #[command(disable_help_subcommand = true)]
-#[command(about = "Reverse engineer and optimize game binaries", long_about = None)]
+#[command(about = "Static analysis and reversible patching for single-player game binaries", long_about = None)]
 struct Cli {
     /// Path to the game directory
     #[arg(short, long)]
@@ -157,21 +155,6 @@ enum Command {
         /// Print machine-readable JSON instead of text
         #[arg(long)]
         json: bool,
-    },
-
-    /// Optimize specific functions
-    Optimize {
-        /// Path to the game executable
-        #[arg(short, long)]
-        game: std::path::PathBuf,
-
-        /// Functions to optimize (comma-separated)
-        #[arg(short, long)]
-        functions: Option<String>,
-
-        /// Output directory for optimized code
-        #[arg(short, long, default_value = "./optimized")]
-        output: std::path::PathBuf,
     },
 
     /// Apply optimization patches to the game
@@ -309,7 +292,7 @@ enum Command {
         game: String,
     },
 
-    /// Start the MCP server so AI agents (OpenCode, Claude Code, ...) can call the tool
+    /// Start the MCP server so MCP clients can call the tool over JSON-RPC
     McpServer {
         /// Transport: stdio for local agents, http for remote/HTTP clients
         #[arg(long, default_value = "stdio", value_parser = ["stdio", "http"])]
@@ -392,15 +375,6 @@ async fn main() -> Result<()> {
         Some(Command::Decompile { game, address, assembly, json }) => {
             info!("Decompiling game: {:?}", game);
             decompile_game(&game, address.as_deref(), assembly, json).await?;
-        }
-        Some(Command::Optimize { game, functions, output }) => {
-            info!("Optimizing game: {:?} (functions: {:?})", game, functions);
-            
-            if is_deus_ex(&game) {
-                optimize_deus_ex(&game, functions.as_deref(), &output).await?;
-            } else {
-                optimize_game(&game, functions.as_deref()).await?;
-            }
         }
         Some(Command::Patch {
             game,
@@ -679,49 +653,6 @@ fn is_deus_ex(path: &Path) -> bool {
             .file_name()
             .map(|name| name.eq_ignore_ascii_case("deusex.exe"))
             .unwrap_or(false)
-}
-
-async fn optimize_deus_ex(
-    game_path: &Path,
-    functions: Option<&str>,
-    output: &Path,
-) -> Result<()> {
-    use optimizer::Optimizer;
-    use patcher::Patcher;
-
-    println!("WARNING: the optimizer is a stub; speedup values are placeholders, not measurements.");
-    if functions.is_some() {
-        println!("NOTE: --functions is ignored until real optimization exists.");
-    }
-
-    let optimizer = Optimizer::new();
-    let optimizations = optimizer.optimize_all(game_path, &[]).await?;
-    
-    for opt in &optimizations {
-        println!("\n{}: {}% (placeholder estimate)", opt.function_name, opt.speedup_pct);
-        println!("  Notes: {}", opt.notes);
-    }
-
-    // `--output` is documented as a directory; also accept an explicit file.
-    let patched_path = if output.exists() && output.is_file() {
-        output.to_path_buf()
-    } else {
-        std::fs::create_dir_all(output).with_context(|| {
-            format!("Failed to create output directory {}", output.display())
-        })?;
-        let file_name = game_path
-            .file_name()
-            .context("Game path has no file name")?;
-        output.join(file_name)
-    };
-
-    backup_before_overwrite(&patched_path)?;
-
-    let patcher = Patcher::new();
-    patcher.apply_patches(game_path, &patched_path).await?;
-    println!("Output: {}", patched_path.display());
-    
-    Ok(())
 }
 
 async fn patch_deus_ex(game_path: &Path, output: &Path) -> Result<()> {
@@ -1285,46 +1216,6 @@ async fn decompile_game(
 
     println!();
     println!("Decompiled by Ghidra headless. Pseudocode is analysis output, not source.");
-
-    Ok(())
-}
-
-async fn optimize_game(
-    game_path: &std::path::Path,
-    functions: Option<&str>,
-) -> Result<()> {
-    use decompiler::Decompiler;
-    use optimizer::Optimizer;
-
-    println!("WARNING: optimization passes are stubs; speedup values are placeholders, not measurements.");
-
-    // Decompile target functions
-    let decompiler = Decompiler::new()?;
-    let funcs = decompiler.find_hot_functions(game_path, functions).await?;
-
-    info!("Found {} functions to optimize:", funcs.len());
-    for func in &funcs {
-        info!("  - {}", func.name);
-    }
-
-    // Optimize each function
-    let optimizer = Optimizer::new();
-    let results = optimizer.optimize_all(game_path, &funcs).await?;
-
-    info!("\nOptimization Results:");
-    for result in &results {
-        match &result.status {
-            optimizer::OptimizeStatus::Success => {
-                info!("  ✓ {} — {}% (placeholder estimate)", result.function_name, result.speedup_pct);
-            }
-            optimizer::OptimizeStatus::Failed(e) => {
-                error!("  ✗ {} — {}", result.function_name, e);
-            }
-            optimizer::OptimizeStatus::Skipped => {
-                info!("  ~ {} — skipped (no optimization needed)", result.function_name);
-            }
-        }
-    }
 
     Ok(())
 }

@@ -416,49 +416,9 @@ impl Decompiler {
         }
     }
 
-    /// Decompile functions requested as comma-separated `0x...` addresses.
-    ///
-    /// Name-based lookup is intentionally not guessed; an unknown name is
-    /// reported and skipped rather than silently decompiling the wrong code.
-    pub async fn find_hot_functions(
-        &self,
-        game_path: &Path,
-        specific_functions: Option<&str>,
-    ) -> Result<Vec<DecompiledFunction>> {
-        info!("Finding hot functions in: {}", game_path.display());
-
-        let Some(specification) = specific_functions else {
-            warn!(
-                "No specific functions requested; automatic hot-function discovery \
-                 is not implemented"
-            );
-            return Ok(Vec::new());
-        };
-
-        let game = GameInfo::from_path(game_path)?;
-        let mut functions = Vec::new();
-
-        for requested in specification.split(',') {
-            let requested = requested.trim();
-            if requested.is_empty() {
-                continue;
-            }
-            if !requested.starts_with("0x") && !requested.starts_with("0X") {
-                warn!(
-                    "Name-based lookup is not implemented; use a hex address for: {}",
-                    requested
-                );
-                continue;
-            }
-            let address = parse_hex_address(requested)?;
-            functions.push(self.decompile_function(&game, address).await?);
-        }
-
-        Ok(functions)
-    }
     /// List every function as a cheap `(address, name, size)` handle.
     ///
-    /// This runs one Ghidra import and writes no pseudocode. Agents should use
+    /// This runs one Ghidra import and writes no pseudocode. Callers should use
     /// it to choose which functions to decompile, one at a time.
     pub async fn list_functions(&self, game: &GameInfo) -> Result<Vec<FunctionSummary>> {
         info!("Listing functions in {}", game.path.display());

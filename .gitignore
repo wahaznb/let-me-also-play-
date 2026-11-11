@@ -1,16 +1,5 @@
 # Build artifacts
 /target/
-/targets/*/target/
-/targets/*/out/
-/targets/*/config/
-/targets/*/build/
-**/*.exe
-**/*.dll
-**/*.so
-**/*.dylib
-**/*.o
-**/*.obj
-**/*.pdb
 
 # Local tool output and scratch space
 /scratch/
@@ -22,6 +11,8 @@
 # Game binaries and game data (never publish these)
 *.exe
 *.dll
+*.so
+*.dylib
 *.dat
 *.pak
 *.vpk
@@ -33,6 +24,11 @@
 *.bin
 *.iso
 *.cue
+
+# Compiled objects
+*.o
+*.obj
+*.pdb
 
 # Frame-time logs and captured metrics
 *.csv
@@ -57,15 +53,6 @@ fps_*.txt
 ghidra_projects/
 decompiled/
 exports/
-
-# Local agent learning state and session data
-/.vibe-wise/
-/.court/
-/.opencode/state/
-/.agents/
-.continue/
-.aider*
-.claude/
 
 # Dependencies and caches
 **/*.pyc

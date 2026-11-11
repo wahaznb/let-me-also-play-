@@ -485,7 +485,7 @@ mod tests {
     fn raw_mode_reports_offsets_and_a_clear_warning() {
         let raw = raw(&[(0x5000_0000, 2), (0x5000_0010, 1)]);
         let report = SampleReport::build(target(), module(), raw, None, 10);
-        assert_eq!(report.function_map, false);
+        assert!(!report.function_map);
         assert_eq!(report.top_offsets.len(), 2);
         assert_eq!(report.top_offsets[0].address, "0x1000");
         assert_eq!(report.top_offsets[0].offset, "0x0");

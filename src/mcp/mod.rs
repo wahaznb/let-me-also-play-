@@ -1,4 +1,4 @@
-//! MCP server — exposes game-opt-tool to AI agents (OpenCode, Claude Code, etc.)
+//! MCP server — exposes game-opt-tool over the Model Context Protocol
 //!
 //! Implements JSON-RPC 2.0 over stdio (newline-delimited) and an HTTP POST
 //! transport. Every tool call maps to the same code paths as the CLI:
@@ -34,7 +34,7 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "game-opt-tool";
 
 /// Upper bound for any single MCP tool text, so one call cannot flood an
-/// agent's context window. Override with `GAME_OPT_MCP_MAX_BYTES`.
+/// client's context window. Override with `GAME_OPT_MCP_MAX_BYTES`.
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 60_000;
 const MIN_MAX_RESPONSE_BYTES: usize = 4_096;
 const MAX_MAX_RESPONSE_BYTES: usize = 1_048_576;
@@ -79,7 +79,7 @@ fn enforce_response_cap_with_limit(text: String, tool: &str, cap: usize) -> Stri
     }
 
     tracing::warn!(
-        "MCP response for '{}' was {} bytes (cap {}); truncating to protect agent context",
+        "MCP response for '{}' was {} bytes (cap {}); truncating to protect client context",
         tool,
         text.len(),
         cap
@@ -102,7 +102,7 @@ fn enforce_response_cap(text: String, tool: &str) -> String {
     enforce_response_cap_with_limit(text, tool, max_response_bytes())
 }
 
-/// Run the MCP server over stdio (the transport OpenCode uses for local servers).
+/// Run the MCP server over stdio, the default local transport.
 pub async fn run_stdio() -> Result<()> {
     info!("MCP server starting on stdio");
 
@@ -464,7 +464,7 @@ async fn call_tool(params: &Value) -> Result<(String, bool)> {
     match result {
         Ok(value) => {
             // Compact JSON keeps tool output small; pretty-printing wastes
-            // context on whitespace in the agent loop.
+            // context on whitespace in the model loop.
             let text = serde_json::to_string(&value)?;
             Ok((enforce_response_cap(text, name), false))
         }

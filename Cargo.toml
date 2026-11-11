@@ -3,14 +3,13 @@ name = "game-opt-tool"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
-description = "Reverse engineer and optimize game binaries for better performance"
+description = "Static binary analysis and reversible patching for single-player games you own"
 license = "MIT"
-authors = ["Game Opt Tool contributors"]
+authors = ["wahaznb"]
 
 [dependencies]
 # CLI
 clap = { version = "4.4", features = ["derive"] }
-clap_complete = "4.4"
 
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
@@ -25,37 +24,25 @@ toml = "0.8"
 uuid = { version = "1.6", features = ["v4"] }
 
 # File system
-walkdir = "2.4"
 dirs = "5.0"
-
-# Networking (for REA integration)
-reqwest = { version = "0.11", features = ["json"] }
 
 # Error handling
 anyhow = "1.0"
-thiserror = "1.0"
 
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Game-specific
 # Binary parsing
 goblin = "0.8"
-object = "0.35"
-# x86/x86-64 decode + re-encode (REA byte-level code generation)
+# x86/x86-64 decode + re-encode (REA byte-level candidate generation)
 iced-x86 = "1.22"
-# Memory reading
-memmap2 = "0.9"
 
-# MCP server for AI agent integration (stdio + HTTP transports)
+# MCP server (stdio + HTTP transports)
 axum = { version = "0.7", features = ["json"] }
 
-# Testing
 [dev-dependencies]
-criterion = "0.5"
 tempfile = "3.9"
-
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Linux perf_event_open sampling (no external perf binary, no root)
