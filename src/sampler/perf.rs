@@ -125,13 +125,19 @@ pub struct PerfEvent {
     tail: u64,
 }
 
-// The pointer is owned by this struct and only used on the sampling thread.
+// SAFETY: `PerfEvent` owns both the file descriptor and the mmap'd ring. The raw
+// pointers are only dereferenced on the thread that owns the value, and `Drop`
+// unmaps and closes before the value can be observed elsewhere. That ownership
+// transfer is why `Send` is sound here; `Sync` is deliberately not implemented.
 unsafe impl Send for PerfEvent {}
 
 impl PerfEvent {
     fn open(tid: u32, frequency: u32) -> io::Result<Self> {
         let attr = PerfEventAttr::cpu_clock(frequency);
         let fd = unsafe {
+            // SAFETY: `attr` is a fully initialized, repr(C) `perf_event_attr`
+            // that outlives the call, and the remaining arguments are plain
+            // integers. The syscall returns a new fd or a negative errno.
             libc::syscall(
                 libc::SYS_perf_event_open,
                 &attr as *const PerfEventAttr,
@@ -146,6 +152,7 @@ impl PerfEvent {
             return Err(io::Error::last_os_error());
         }
 
+        // SAFETY: `sysconf` takes no pointers and returns a page size or -1.
         let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
         let page_size = if page_size > 0 {
             page_size as usize
@@ -155,6 +162,9 @@ impl PerfEvent {
         let map_len = (1 + RING_DATA_PAGES) * page_size;
 
         let base = unsafe {
+            // SAFETY: `fd` is valid and owned by this function, `map_len` is the
+            // exact length requested, and the kernel only reads the fd for the
+            // mapping. A failure is reported as `MAP_FAILED` and handled below.
             libc::mmap(
                 ptr::null_mut(),
                 map_len,
@@ -173,6 +183,8 @@ impl PerfEvent {
         }
         let base = base as *mut u8;
 
+        // SAFETY: `base` points at a live mapping of `map_len` bytes, which is at
+        // least the metadata page, so both offsets are in bounds.
         let data_offset = unsafe { read_u64(base, MMAP_DATA_OFFSET_OFFSET) } as usize;
         let data_size = unsafe { read_u64(base, MMAP_DATA_SIZE_OFFSET) } as usize;
 
@@ -193,6 +205,8 @@ impl PerfEvent {
             || data_size == 0
             || data_offset.saturating_add(data_size) > map_len
         {
+            // SAFETY: `base`/`map_len` are the exact values returned by `mmap`,
+            // and `fd` is still open, so the pair is a valid unmapping target.
             unsafe {
                 libc::munmap(base as *mut libc::c_void, map_len);
                 libc::close(fd);
@@ -203,8 +217,12 @@ impl PerfEvent {
             ));
         }
 
+        // SAFETY: `fd` is a valid perf event descriptor and the enable ioctl
+        // takes no pointer argument.
         if unsafe { libc::ioctl(fd, PERF_EVENT_IOC_ENABLE, 0) } < 0 {
             let error = io::Error::last_os_error();
+            // SAFETY: same valid mapping and descriptor as above; the event is
+            // not enabled, so no thread observes the region after this point.
             unsafe {
                 libc::munmap(base as *mut libc::c_void, map_len);
                 libc::close(fd);
@@ -212,11 +230,15 @@ impl PerfEvent {
             return Err(error);
         }
 
+        // SAFETY: `base` is the mapping created above and the tail offset lives in
+        // its metadata page.
         let tail = unsafe { read_u64(base, MMAP_DATA_TAIL_OFFSET) };
         Ok(Self {
             fd,
             base,
             map_len,
+            // SAFETY: the bounds check above guarantees `data_offset` is inside
+            // `map_len`, so the derived pointer stays within the mapping.
             data_ptr: unsafe { base.add(data_offset) },
             data_size,
             tail,
@@ -225,6 +247,8 @@ impl PerfEvent {
 
     /// Drain all records currently in the ring buffer.
     fn drain(&mut self, samples: &mut RawSamples) {
+        // SAFETY: `base` is a live mapping owned by `self`, and the metadata page
+        // is always mapped ahead of the data region.
         let head = unsafe { read_u64(self.base, MMAP_DATA_HEAD_OFFSET) };
         fence(Ordering::Acquire);
 
@@ -276,18 +300,16 @@ impl PerfEvent {
                         }
                     }
                 }
-                PERF_RECORD_LOST => {
-                    if record_size >= RECORD_HEADER_SIZE + LOST_RECORD_SIZE {
-                        let mut lost_bytes = [0u8; 8];
-                        if copy_ring(
-                            self.data_ptr,
-                            self.data_size,
-                            self.tail + RECORD_HEADER_SIZE + 8,
-                            &mut lost_bytes,
-                        ) {
-                            let lost = u64::from_ne_bytes(lost_bytes);
-                            samples.lost_samples = samples.lost_samples.saturating_add(lost);
-                        }
+                PERF_RECORD_LOST if record_size >= RECORD_HEADER_SIZE + LOST_RECORD_SIZE => {
+                    let mut lost_bytes = [0u8; 8];
+                    if copy_ring(
+                        self.data_ptr,
+                        self.data_size,
+                        self.tail + RECORD_HEADER_SIZE + 8,
+                        &mut lost_bytes,
+                    ) {
+                        let lost = u64::from_ne_bytes(lost_bytes);
+                        samples.lost_samples = samples.lost_samples.saturating_add(lost);
                     }
                 }
                 _ => {}
@@ -297,6 +319,8 @@ impl PerfEvent {
         }
 
         fence(Ordering::Release);
+        // SAFETY: `self` owns the mapping, and the release fence above orders this
+        // publish after the record reads so the kernel cannot reclaim them early.
         unsafe {
             write_u64(self.base, MMAP_DATA_TAIL_OFFSET, self.tail);
         }
@@ -305,6 +329,8 @@ impl PerfEvent {
 
 impl Drop for PerfEvent {
     fn drop(&mut self) {
+        // SAFETY: `self` still owns the descriptor and mapping, and `Drop` runs
+        // exactly once, so the disable/unmap/close triple cannot double-free.
         unsafe {
             libc::ioctl(self.fd, PERF_EVENT_IOC_DISABLE, 0);
             libc::munmap(self.base as *mut libc::c_void, self.map_len);
@@ -313,10 +339,19 @@ impl Drop for PerfEvent {
     }
 }
 
+/// Read a `u64` from a mapping written by the kernel.
+///
+/// # Safety
+/// `base` must point at a live mapping and `offset` must leave at least eight
+/// readable bytes. Volatile access keeps the read from being reordered or elided.
 unsafe fn read_u64(base: *const u8, offset: usize) -> u64 {
     ptr::read_volatile(base.add(offset) as *const u64)
 }
 
+/// Write a `u64` into a mapping shared with the kernel.
+///
+/// # Safety
+/// Same requirements as [`read_u64`], plus the caller must be the only writer.
 unsafe fn write_u64(base: *mut u8, offset: usize, value: u64) {
     ptr::write_volatile(base.add(offset) as *mut u64, value);
 }
@@ -331,6 +366,9 @@ fn copy_ring(base: *const u8, ring_size: usize, position: u64, out: &mut [u8]) -
     }
     let start = (position as usize) % ring_size;
     let first = (ring_size - start).min(out.len());
+    // SAFETY: `start` is reduced modulo `ring_size` and `first <= out.len()`, so
+    // both source slices stay inside the caller-provided ring and `out`. The
+    // wrapped copy starts at `base`, which is the beginning of the same ring.
     unsafe {
         ptr::copy_nonoverlapping(base.add(start), out.as_mut_ptr(), first);
         if first < out.len() {
@@ -463,10 +501,7 @@ pub fn sample_process(pid: u32, duration: Duration, frequency: u32) -> Result<Ra
 }
 
 fn is_thread_gone(error: &io::Error) -> bool {
-    matches!(
-        error.raw_os_error(),
-        Some(libc::ESRCH) | Some(libc::ENOENT)
-    )
+    matches!(error.raw_os_error(), Some(libc::ESRCH) | Some(libc::ENOENT))
 }
 
 /// Check whether this process can open a user-space perf event.

@@ -17,6 +17,74 @@ use tracing::{info, warn};
 /// Ghidra's default project name inside the temporary project directory.
 const GHIDRA_PROJECT_NAME: &str = "GameOptProject";
 
+/// A throwaway Ghidra workspace used by one headless run.
+///
+/// The directory layout is fixed: a Ghidra project, the post-script, and the
+/// result file. Cleanup is explicit so a long import cannot leave a large temp
+/// tree behind.
+struct Workspace {
+    root: PathBuf,
+    project_dir: PathBuf,
+    script_dir: PathBuf,
+    output_path: PathBuf,
+}
+
+impl Workspace {
+    async fn create(label: &str, script_name: &str, script: &str) -> Result<Self> {
+        let root = std::env::temp_dir().join(format!(
+            "game-opt-ghidra-{}-{}",
+            label,
+            uuid::Uuid::new_v4()
+        ));
+        let project_dir = root.join("project");
+        let script_dir = root.join("scripts");
+        let output_path = root.join("result.txt");
+
+        let setup = async {
+            tokio::fs::create_dir(&root)
+                .await
+                .with_context(|| format!("Failed to create Ghidra workspace {}", root.display()))?;
+            tokio::fs::create_dir(&project_dir).await.with_context(|| {
+                format!(
+                    "Failed to create Ghidra project directory {}",
+                    project_dir.display()
+                )
+            })?;
+            tokio::fs::create_dir(&script_dir)
+                .await
+                .context("Failed to create the Ghidra script directory")?;
+            tokio::fs::write(script_dir.join(script_name), script)
+                .await
+                .with_context(|| format!("Failed to write the Ghidra script {script_name}"))?;
+            Ok(())
+        }
+        .await;
+
+        if let Err(error) = setup {
+            let _ = tokio::fs::remove_dir_all(&root).await;
+            return Err(error);
+        }
+
+        Ok(Self {
+            root,
+            project_dir,
+            script_dir,
+            output_path,
+        })
+    }
+
+    /// Root directory, used as the headless analyzer's working directory.
+    fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Remove the whole workspace. Cleanup failures are not worth reporting:
+    /// the temp directory is disposable and the command result is what matters.
+    async fn cleanup(self) {
+        let _ = tokio::fs::remove_dir_all(&self.root).await;
+    }
+}
+
 /// Hard limit for a single headless decompilation.
 const GHIDRA_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -187,8 +255,8 @@ impl Decompiler {
             if !home.join("bin").join("java").is_file() {
                 bail!("JAVA_HOME does not contain bin/java: {}", home.display());
             }
-            if let Some(required) = required_java_version(&ghidra_path)
-                .and_then(|version| version.parse::<u32>().ok())
+            if let Some(required) =
+                required_java_version(&ghidra_path).and_then(|version| version.parse::<u32>().ok())
             {
                 if let Some(actual) = java_major_version(home) {
                     if actual < required {
@@ -274,29 +342,12 @@ impl Decompiler {
         info!("Decompiling 0x{:X} from {}", address, game.path.display());
 
         let workspace =
-            std::env::temp_dir().join(format!("game-opt-ghidra-{}", uuid::Uuid::new_v4()));
-        let project_dir = workspace.join("project");
-        let script_dir = workspace.join("scripts");
-        let output_path = workspace.join("decompiled.txt");
-        std::fs::create_dir(&workspace).with_context(|| {
-            format!("Failed to create Ghidra workspace {}", workspace.display())
-        })?;
-        let setup = (|| -> Result<()> {
-            std::fs::create_dir(&project_dir).with_context(|| {
-                format!(
-                    "Failed to create Ghidra project directory {}",
-                    project_dir.display()
-                )
-            })?;
-            std::fs::create_dir(&script_dir)?;
-            std::fs::write(script_dir.join("GameOptDecompile.java"), DECOMPILE_SCRIPT)
-                .context("Failed to write the Ghidra decompile script")?;
-            Ok(())
-        })();
-        if let Err(error) = setup {
-            let _ = std::fs::remove_dir_all(&workspace);
-            return Err(error);
-        }
+            Workspace::create("decompile", "GameOptDecompile.java", DECOMPILE_SCRIPT).await?;
+        let (project_dir, script_dir, output_path) = (
+            workspace.project_dir.clone(),
+            workspace.script_dir.clone(),
+            workspace.output_path.clone(),
+        );
 
         let mut command = self.headless_command();
         command
@@ -312,7 +363,7 @@ impl Decompiler {
             .arg(format!("0x{:X}", address))
             .arg(&output_path)
             .arg("-deleteProject")
-            .current_dir(&workspace)
+            .current_dir(workspace.root())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -329,6 +380,7 @@ impl Decompiler {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 self.interpret_output(address, output.status, &stdout, &stderr, &output_path)
+                    .await
             }
             Ok(Err(error)) => Err(error).context("Failed to run Ghidra headless analyzer"),
             Err(_) => Err(anyhow::anyhow!(
@@ -338,7 +390,7 @@ impl Decompiler {
         };
 
         // The temporary project can be large; never leave it behind.
-        let _ = std::fs::remove_dir_all(&workspace);
+        workspace.cleanup().await;
 
         result
     }
@@ -347,8 +399,15 @@ impl Decompiler {
     fn headless_command(&self) -> Command {
         #[cfg(windows)]
         {
+            // A `.bat` cannot be executed directly, and `cmd /C "<path>"` breaks
+            // as soon as the path contains a space. Routing through `call` keeps
+            // the quoted path intact; Rust quotes the argument for us, so
+            // metacharacters in the path are not interpreted by cmd.
             let mut command = Command::new("cmd");
-            command.arg("/C").arg(self.analyze_headless_path());
+            command
+                .arg("/C")
+                .arg("call")
+                .arg(self.analyze_headless_path());
             command
         }
         #[cfg(not(windows))]
@@ -357,7 +416,7 @@ impl Decompiler {
         }
     }
 
-    fn interpret_output(
+    async fn interpret_output(
         &self,
         address: u64,
         status: std::process::ExitStatus,
@@ -367,7 +426,7 @@ impl Decompiler {
     ) -> Result<DecompiledFunction> {
         let log = tail(stdout, stderr);
 
-        if let Ok(content) = std::fs::read_to_string(output_path) {
+        if let Ok(content) = tokio::fs::read_to_string(output_path).await {
             match parse_decompile_output(&content) {
                 Ok(function) => {
                     if !status.success() {
@@ -424,30 +483,12 @@ impl Decompiler {
         info!("Listing functions in {}", game.path.display());
 
         let workspace =
-            std::env::temp_dir().join(format!("game-opt-ghidra-list-{}", uuid::Uuid::new_v4()));
-        let project_dir = workspace.join("project");
-        let script_dir = workspace.join("scripts");
-        let output_path = workspace.join("functions.txt");
-        std::fs::create_dir(&workspace).with_context(|| {
-            format!("Failed to create Ghidra workspace {}", workspace.display())
-        })?;
-
-        let setup = (|| -> Result<()> {
-            std::fs::create_dir(&project_dir).with_context(|| {
-                format!(
-                    "Failed to create Ghidra project directory {}",
-                    project_dir.display()
-                )
-            })?;
-            std::fs::create_dir(&script_dir)?;
-            std::fs::write(script_dir.join("GameOptListFunctions.java"), LIST_FUNCTIONS_SCRIPT)
-                .context("Failed to write the Ghidra function-list script")?;
-            Ok(())
-        })();
-        if let Err(error) = setup {
-            let _ = std::fs::remove_dir_all(&workspace);
-            return Err(error);
-        }
+            Workspace::create("list", "GameOptListFunctions.java", LIST_FUNCTIONS_SCRIPT).await?;
+        let (project_dir, script_dir, output_path) = (
+            workspace.project_dir.clone(),
+            workspace.script_dir.clone(),
+            workspace.output_path.clone(),
+        );
 
         let mut command = self.headless_command();
         command
@@ -462,7 +503,7 @@ impl Decompiler {
             .arg("GameOptListFunctions.java")
             .arg(&output_path)
             .arg("-deleteProject")
-            .current_dir(&workspace)
+            .current_dir(workspace.root())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -476,7 +517,7 @@ impl Decompiler {
         let run = tokio::time::timeout(GHIDRA_TIMEOUT, command.output()).await;
         let result = match run {
             Ok(Ok(output)) => {
-                if let Ok(content) = std::fs::read_to_string(&output_path) {
+                if let Ok(content) = tokio::fs::read_to_string(&output_path).await {
                     parse_function_list(&content)
                 } else {
                     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -496,7 +537,7 @@ impl Decompiler {
             )),
         };
 
-        let _ = std::fs::remove_dir_all(&workspace);
+        workspace.cleanup().await;
         result
     }
 }

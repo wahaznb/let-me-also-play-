@@ -300,6 +300,11 @@ decompilation is paginated, and `profile`/`compare` return statistics rather
 than raw CSV rows. The server binds to `127.0.0.1` by default and stores no API
 keys or credentials.
 
+A non-loopback bind is refused unless you pass `--allow-remote`, because the
+tools can patch and overwrite files and the transport has no authentication.
+Browser requests are also rejected unless their `Origin` is this machine, which
+blocks DNS-rebinding attempts against the local port.
+
 ## Status
 
 | Area | Status |

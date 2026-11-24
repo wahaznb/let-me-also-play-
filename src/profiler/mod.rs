@@ -105,11 +105,7 @@ pub fn compare_results(
     let patched_stats = &patched.stats;
 
     ProfileComparison {
-        avg_fps: MetricDelta::new(
-            baseline_stats.avg_fps,
-            patched_stats.avg_fps,
-            true,
-        ),
+        avg_fps: MetricDelta::new(baseline_stats.avg_fps, patched_stats.avg_fps, true),
         low_1pct_fps: MetricDelta::new(
             baseline_stats.low_1pct_fps,
             patched_stats.low_1pct_fps,
@@ -176,8 +172,7 @@ fn comparison_warnings(
     }
 
     warnings.push(
-        "Comparison assumes both runs cover the same scene, settings, and workload."
-            .to_string(),
+        "Comparison assumes both runs cover the same scene, settings, and workload.".to_string(),
     );
     warnings.push(
         "Single-run comparison: this is an observed difference in these two logs, \
@@ -200,17 +195,11 @@ impl Profiler {
     ///
     /// `tail_frames == 0` analyzes the whole log; a positive value analyzes
     /// only the last N frames.
-    pub fn profile_csv(
-        &self,
-        log_path: &Path,
-        tail_frames: usize,
-    ) -> Result<ProfileResults> {
+    pub fn profile_csv(&self, log_path: &Path, tail_frames: usize) -> Result<ProfileResults> {
         let file = File::open(log_path)
             .with_context(|| format!("Failed to open log {}", log_path.display()))?;
-        let frame_times =
-            parse_mangohud_reader(BufReader::new(file), tail_frames).with_context(|| {
-                format!("Failed to parse MangoHud log {}", log_path.display())
-            })?;
+        let frame_times = parse_mangohud_reader(BufReader::new(file), tail_frames)
+            .with_context(|| format!("Failed to parse MangoHud log {}", log_path.display()))?;
         let stats = compute_stats(&frame_times)?;
 
         info!(
@@ -275,8 +264,7 @@ impl Profiler {
 
     /// Serialize results as pretty JSON.
     pub fn export_json(&self, results: &ProfileResults) -> Result<String> {
-        serde_json::to_string_pretty(results)
-            .context("Failed to serialize profile results")
+        serde_json::to_string_pretty(results).context("Failed to serialize profile results")
     }
 
     /// Compare two MangoHud logs.
@@ -310,8 +298,7 @@ impl Profiler {
 
     /// Serialize a comparison as pretty JSON.
     pub fn export_comparison_json(&self, comparison: &ProfileComparison) -> Result<String> {
-        serde_json::to_string_pretty(comparison)
-            .context("Failed to serialize comparison results")
+        serde_json::to_string_pretty(comparison).context("Failed to serialize comparison results")
     }
 }
 
@@ -322,10 +309,7 @@ enum ColumnKind {
 }
 
 /// Parse a MangoHud CSV from any buffered reader.
-fn parse_mangohud_reader<R: BufRead>(
-    mut reader: R,
-    tail_frames: usize,
-) -> Result<Vec<f64>> {
+fn parse_mangohud_reader<R: BufRead>(mut reader: R, tail_frames: usize) -> Result<Vec<f64>> {
     let mut header: Option<(usize, ColumnKind)> = None;
     let mut first_header_error: Option<String> = None;
     let mut prologue_lines = 0usize;
@@ -358,8 +342,7 @@ fn parse_mangohud_reader<R: BufRead>(
                         header = Some(parsed);
                     }
                     Err(error) => {
-                        first_header_error
-                            .get_or_insert_with(|| error.to_string());
+                        first_header_error.get_or_insert_with(|| error.to_string());
                         prologue_lines += 1;
                         if prologue_lines >= HEADER_PROBE_LINES {
                             bail!(
@@ -522,7 +505,10 @@ pub fn compute_stats(frame_times: &[f64]) -> Result<FrameTimeStats> {
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let count = sorted.len();
-    if sorted.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+    if sorted
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 0.0)
+    {
         bail!("Frame times must be finite and positive");
     }
 
@@ -615,12 +601,10 @@ mod tests {
         assert!((comparison.p99_frame_time_ms.percent + 20.0).abs() < 1e-9);
         assert!(comparison.p99_frame_time_ms.improved);
         assert!(comparison.stutter_ratio.absolute.abs() < 1e-9);
-        assert!(
-            comparison
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("fewer than 100 frames"))
-        );
+        assert!(comparison
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("fewer than 100 frames")));
     }
 
     #[test]
@@ -639,18 +623,14 @@ mod tests {
         let patched = results_from(&[10.0; 200]); // 2 seconds
 
         let comparison = compare_results(baseline, patched, 0);
-        assert!(
-            comparison
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("durations differ"))
-        );
-        assert!(
-            comparison
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("not a statistical significance test"))
-        );
+        assert!(comparison
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("durations differ")));
+        assert!(comparison
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("not a statistical significance test")));
     }
 
     #[test]
@@ -659,12 +639,10 @@ mod tests {
         let patched = results_from(&[10.0; 100]);
 
         let comparison = compare_results(baseline, patched, 50);
-        assert!(
-            comparison
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("trimmed to their last 50 frames"))
-        );
+        assert!(comparison
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("trimmed to their last 50 frames")));
     }
 
     #[test]
@@ -742,8 +720,7 @@ mod tests {
     #[test]
     fn tail_keeps_only_last_n_frames() {
         let csv = "fps,frametime\n100,1\n100,2\n100,3\n100,4\n";
-        let frames =
-            parse_mangohud_reader(Cursor::new(csv.as_bytes()), 2).unwrap();
+        let frames = parse_mangohud_reader(Cursor::new(csv.as_bytes()), 2).unwrap();
         assert_eq!(frames, vec![3.0, 4.0]);
     }
 

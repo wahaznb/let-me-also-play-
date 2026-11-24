@@ -42,10 +42,10 @@ pub struct FunctionTarget {
 /// Impact level estimation
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ImpactLevel {
-    Critical,  // Major performance impact
-    High,      // Significant impact
-    Medium,    // Moderate impact
-    Low,       // Minor impact
+    Critical, // Major performance impact
+    High,     // Significant impact
+    Medium,   // Moderate impact
+    Low,      // Minor impact
 }
 
 /// A known quirk to preserve
@@ -64,16 +64,24 @@ pub struct QuirkDatabase {
     pub games: HashMap<String, Vec<Quirk>>,
 }
 
-/// Binary format
+/// Binary format.
+///
+/// The variant names are the identifiers written in config files, so they are
+/// kept uppercase even where they are not acronyms.
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum BinaryFormat {
-    PE,      // Windows executable
-    ELF,     // Linux executable
-    MachO,   // macOS executable
+    PE,    // Windows executable
+    ELF,   // Linux executable
+    MachO, // macOS executable
     Unknown,
 }
 
-/// Architecture
+/// Architecture.
+///
+/// The variant names are the identifiers written in config files, so they are
+/// kept uppercase even where they are not acronyms.
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Architecture {
     X86,
@@ -148,7 +156,6 @@ impl Config {
     }
 
     /// Get game config by key or display name, tolerating punctuation and case.
-    /// Look up a game by key or display name.
     #[allow(dead_code)]
     pub fn get_game(&self, name: &str) -> Option<&GameConfig> {
         self.find_game(name)

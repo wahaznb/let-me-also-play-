@@ -32,8 +32,7 @@ fn make_pe(is_64: bool) -> Vec<u8> {
     let machine = if is_64 { 0x8664u16 } else { 0x014Cu16 };
     data[coff..coff + 2].copy_from_slice(&machine.to_le_bytes());
     data[coff + 2..coff + 4].copy_from_slice(&1u16.to_le_bytes());
-    data[coff + 16..coff + 18]
-        .copy_from_slice(&(optional_size as u16).to_le_bytes());
+    data[coff + 16..coff + 18].copy_from_slice(&(optional_size as u16).to_le_bytes());
     let characteristics = if is_64 { 0x0022u16 } else { 0x0102u16 };
     data[coff + 18..coff + 20].copy_from_slice(&characteristics.to_le_bytes());
 
@@ -44,8 +43,7 @@ fn make_pe(is_64: bool) -> Vec<u8> {
     data[optional + 16..optional + 20].copy_from_slice(&PE32_ENTRY_RVA.to_le_bytes());
     data[optional + 20..optional + 24].copy_from_slice(&0x1000u32.to_le_bytes());
     if is_64 {
-        data[optional + 24..optional + 32]
-            .copy_from_slice(&0x0000_0001_4000_0000u64.to_le_bytes());
+        data[optional + 24..optional + 32].copy_from_slice(&0x0000_0001_4000_0000u64.to_le_bytes());
     } else {
         data[optional + 28..optional + 32].copy_from_slice(&0x0040_0000u32.to_le_bytes());
     }

@@ -22,12 +22,10 @@ use crate::game::GameInfo;
 use crate::patcher::{PatchSpec, Patcher};
 use crate::profiler::Profiler;
 use crate::verifier::Verifier;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use tracing::info;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -144,7 +142,11 @@ pub async fn run_stdio() -> Result<()> {
 }
 
 /// Run the MCP server over HTTP (`POST /mcp`).
-pub async fn run_http(host: &str, port: u16) -> Result<()> {
+///
+/// Binding to a non-loopback address is refused unless `allow_remote` is set:
+/// the tools can patch and overwrite files, so an unauthenticated listener on a
+/// routable interface would hand those powers to anyone who can reach the port.
+pub async fn run_http(host: &str, port: u16, allow_remote: bool) -> Result<()> {
     use axum::{routing::post, Router};
 
     let addr = format!("{host}:{port}");
@@ -155,10 +157,17 @@ pub async fn run_http(host: &str, port: u16) -> Result<()> {
         .local_addr()
         .context("Failed to read MCP HTTP server address")?;
 
-    let state = Arc::new(Mutex::new(()));
+    if !local.ip().is_loopback() && !allow_remote {
+        bail!(
+            "Refusing to expose the MCP server on {local} without authentication.\n\
+             Pass --allow-remote only if you accept that anyone who can reach that \
+             address can patch and overwrite files."
+        );
+    }
+
     let router = Router::new()
         .route("/mcp", post(http_handler))
-        .with_state(state);
+        .with_state(HttpState { allow_remote });
 
     info!("MCP HTTP server listening on http://{local}/mcp");
     axum::serve(listener, router)
@@ -167,12 +176,62 @@ pub async fn run_http(host: &str, port: u16) -> Result<()> {
     Ok(())
 }
 
+/// Shared HTTP transport state.
+#[derive(Clone)]
+struct HttpState {
+    /// Whether requests may come from a non-loopback origin.
+    allow_remote: bool,
+}
+
+/// Reject browser requests from an origin that is not this machine.
+///
+/// The listener is loopback by default, which does not protect it from DNS
+/// rebinding: a page on the internet can resolve its own hostname to 127.0.0.1
+/// and POST here. Checking `Origin` stops that, because the browser always
+/// reports the real page origin.
+fn origin_is_allowed(headers: &axum::http::HeaderMap, allow_remote: bool) -> bool {
+    let Some(origin) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    else {
+        // No Origin header: a native client (curl, an MCP client), not a page.
+        return true;
+    };
+
+    if allow_remote {
+        return true;
+    }
+
+    let authority = origin
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(origin);
+    let authority = authority.split('/').next().unwrap_or("");
+    // Bracketed IPv6 keeps its colons; everything else drops the port.
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
 async fn http_handler(
-    axum::extract::State(_state): axum::extract::State<Arc<Mutex<()>>>,
+    axum::extract::State(state): axum::extract::State<HttpState>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
+
+    if !origin_is_allowed(&headers, state.allow_remote) {
+        return (
+            StatusCode::FORBIDDEN,
+            "Cross-origin requests are not accepted by the local MCP server",
+        )
+            .into_response();
+    }
 
     let request: Value = match serde_json::from_slice(&body) {
         Ok(value) => value,
@@ -444,7 +503,10 @@ async fn call_tool(params: &Value) -> Result<(String, bool)> {
         .get("name")
         .and_then(Value::as_str)
         .context("Missing tool name")?;
-    let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let args = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
 
     let result = match name {
         "game_info" => tool_game_info(&args),
@@ -488,9 +550,7 @@ fn opt_bool(args: &Value, key: &str) -> bool {
 }
 
 fn opt_frames(args: &Value) -> usize {
-    args.get("frames")
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as usize
+    args.get("frames").and_then(Value::as_u64).unwrap_or(0) as usize
 }
 
 fn tool_game_info(args: &Value) -> Result<Value> {
@@ -536,10 +596,7 @@ async fn tool_decompile(args: &Value) -> Result<Value> {
         .clamp(1_024, cap);
     let pseudocode_budget = if include_assembly { budget / 2 } else { budget };
 
-    let offset = args
-        .get("offset")
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as usize;
+    let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
     let pseudocode_total = function.pseudocode.len();
     let (pseudocode, next_offset, truncated) =
         slice_text(&function.pseudocode, offset, pseudocode_budget);
@@ -579,10 +636,7 @@ async fn tool_list_functions(args: &Value) -> Result<Value> {
     }
 
     let filter = opt_str(args, "filter").map(|value| value.to_lowercase());
-    let offset = args
-        .get("offset")
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as usize;
+    let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
     // Keep the page safely inside the response budget; ~80 bytes per handle
     // leaves room for long function names and JSON overhead.
     let rows_by_budget = (max_response_bytes().saturating_sub(512) / 80).max(1);
@@ -632,8 +686,7 @@ async fn tool_sample(args: &Value) -> Result<Value> {
 
     let pid = match args.get("pid").and_then(Value::as_u64) {
         Some(value) => Some(
-            u32::try_from(value)
-                .map_err(|_| anyhow::anyhow!("pid is outside the valid range"))?,
+            u32::try_from(value).map_err(|_| anyhow::anyhow!("pid is outside the valid range"))?,
         ),
         None => None,
     };
@@ -770,6 +823,59 @@ async fn tool_verify(args: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn headers_with_origin(origin: Option<&str>) -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        if let Some(origin) = origin {
+            headers.insert(
+                axum::http::header::ORIGIN,
+                axum::http::HeaderValue::from_str(origin).unwrap(),
+            );
+        }
+        headers
+    }
+
+    #[test]
+    fn accepts_requests_without_an_origin_header() {
+        assert!(origin_is_allowed(&headers_with_origin(None), false));
+    }
+
+    #[test]
+    fn accepts_loopback_origins() {
+        for origin in [
+            "http://127.0.0.1:9000",
+            "http://localhost:9000",
+            "http://[::1]:9000",
+        ] {
+            assert!(
+                origin_is_allowed(&headers_with_origin(Some(origin)), false),
+                "{origin} should be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_remote_origins() {
+        for origin in [
+            "http://evil.example",
+            "https://localhost.evil.example",
+            "null",
+            "http://127.0.0.1.evil.example:9000",
+        ] {
+            assert!(
+                !origin_is_allowed(&headers_with_origin(Some(origin)), false),
+                "{origin} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn allow_remote_disables_the_origin_check() {
+        assert!(origin_is_allowed(
+            &headers_with_origin(Some("http://evil.example")),
+            true
+        ));
+    }
 
     #[test]
     fn initializes_with_tool_capability() {

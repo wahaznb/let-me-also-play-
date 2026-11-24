@@ -5,9 +5,9 @@
 //! replacement. The resulting spec is consumed by the verified Patcher, which
 //! independently re-checks every address, section, and byte before writing.
 
+use super::candidates::Candidate;
 use crate::patcher::{BytePatchSpec, PatchSpec, PATCH_SCHEMA_VERSION};
 use anyhow::Context;
-use super::candidates::Candidate;
 
 /// Convert candidates into a patch spec. Returns `Ok(None)` when there are no
 /// candidates so the caller can short-circuit without writing a binary.
@@ -47,7 +47,8 @@ pub fn build_patch_spec(
         patches,
         sections: Vec::new(),
     };
-    spec.validate().context("Generated REA patch spec failed validation")?;
+    spec.validate()
+        .context("Generated REA patch spec failed validation")?;
     Ok(Some(spec))
 }
 
@@ -86,7 +87,9 @@ mod tests {
     #[test]
     fn builds_a_valid_spec() {
         let cands = vec![cand(0x1000, vec![0x89, 0xC0], vec![0x66, 0x90])];
-        let spec = build_patch_spec(None, None, false, &cands).unwrap().unwrap();
+        let spec = build_patch_spec(None, None, false, &cands)
+            .unwrap()
+            .unwrap();
         assert_eq!(spec.patches.len(), 1);
         assert_eq!(spec.patches[0].address, "0x1000");
         assert_eq!(spec.patches[0].expected, "89c0");

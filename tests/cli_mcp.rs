@@ -50,8 +50,8 @@ fn stdio_session_with_env(requests: &[Value], env: &[(&str, &str)]) -> HashMap<i
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut responses = HashMap::new();
     for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
-        let value: Value =
-            serde_json::from_str(line).unwrap_or_else(|error| panic!("bad JSON line: {error}: {line}"));
+        let value: Value = serde_json::from_str(line)
+            .unwrap_or_else(|error| panic!("bad JSON line: {error}: {line}"));
         if let Some(id) = value["id"].as_i64() {
             responses.insert(id, value);
         }
@@ -68,7 +68,8 @@ fn tool_text(response: &Value) -> String {
 
 fn tool_json(response: &Value) -> Value {
     let text = tool_text(response);
-    serde_json::from_str(&text).unwrap_or_else(|error| panic!("tool text is not JSON: {error}: {text}"))
+    serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("tool text is not JSON: {error}: {text}"))
 }
 
 fn is_error(response: &Value) -> bool {
@@ -140,7 +141,10 @@ fn stdio_initializes_and_lists_tools() {
     assert!(init["capabilities"]["tools"].is_object());
 
     let tools = responses[&2]["result"]["tools"].as_array().unwrap();
-    let names: Vec<&str> = tools.iter().filter_map(|tool| tool["name"].as_str()).collect();
+    let names: Vec<&str> = tools
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
     for expected in [
         "game_info",
         "decompile",
@@ -158,7 +162,9 @@ fn stdio_initializes_and_lists_tools() {
     }
     assert_eq!(responses[&3]["result"], json!({}));
     assert!(
-        !responses.values().any(|response| response["id"] == json!(null)),
+        !responses
+            .values()
+            .any(|response| response["id"] == json!(null)),
         "notifications must not produce responses"
     );
 }
@@ -255,7 +261,11 @@ fn stdio_backs_up_and_verifies_a_file() {
         }),
     ]);
 
-    assert!(!is_error(&responses[&1]), "backup failed: {}", tool_text(&responses[&1]));
+    assert!(
+        !is_error(&responses[&1]),
+        "backup failed: {}",
+        tool_text(&responses[&1])
+    );
     let record = tool_json(&responses[&1]);
     assert!(record["sha256"].as_str().unwrap().len() == 64);
 
@@ -328,7 +338,10 @@ fn stdio_caps_oversized_tool_output_and_reports_truncation() {
     assert_eq!(capped["tool"], "patch");
     assert!(capped["total_bytes"].as_u64().unwrap() > 4_096);
     assert!(
-        capped["preview"].as_str().unwrap().contains("manifest_path"),
+        capped["preview"]
+            .as_str()
+            .unwrap()
+            .contains("manifest_path"),
         "preview should keep the manifest handle: {}",
         capped["preview"]
     );
@@ -470,14 +483,23 @@ impl HttpServer {
     fn start() -> Self {
         let port = free_port();
         let child = Command::new(BIN)
-            .args(["mcp-server", "--transport", "http", "--port", &port.to_string()])
+            .args([
+                "mcp-server",
+                "--transport",
+                "http",
+                "--port",
+                &port.to_string(),
+            ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("failed to start HTTP MCP server");
 
-        assert!(wait_for_port(port), "HTTP MCP server never listened on {port}");
+        assert!(
+            wait_for_port(port),
+            "HTTP MCP server never listened on {port}"
+        );
         Self { child, port }
     }
 

@@ -134,7 +134,11 @@ fn patch_then_unpatch_roundtrips_exact_bytes() {
         manifest.to_str().unwrap(),
         "--json",
     ]);
-    assert!(result.status.success(), "unpatch failed: {}", stderr(&result));
+    assert!(
+        result.status.success(),
+        "unpatch failed: {}",
+        stderr(&result)
+    );
     let report = json(&result);
     assert_eq!(report["patches_reverted"], 1);
     assert_eq!(report["sections_removed"], 0);
@@ -199,7 +203,11 @@ fn code_cave_patch_is_applied_and_removed() {
         manifest.to_str().unwrap(),
         "--json",
     ]);
-    assert!(result.status.success(), "unpatch failed: {}", stderr(&result));
+    assert!(
+        result.status.success(),
+        "unpatch failed: {}",
+        stderr(&result)
+    );
     assert_eq!(std::fs::read(&output).unwrap(), original);
 }
 
@@ -233,7 +241,11 @@ fn wrong_expected_bytes_are_refused_without_writing() {
         spec.to_str().unwrap(),
     ]);
     assert!(!result.status.success());
-    assert!(stderr(&result).contains("do not match"), "{}", stderr(&result));
+    assert!(
+        stderr(&result).contains("do not match"),
+        "{}",
+        stderr(&result)
+    );
     assert!(!output.exists());
 }
 
@@ -268,7 +280,11 @@ fn dry_run_does_not_write_output_or_manifest() {
         "--dry-run",
         "--json",
     ]);
-    assert!(result.status.success(), "dry-run failed: {}", stderr(&result));
+    assert!(
+        result.status.success(),
+        "dry-run failed: {}",
+        stderr(&result)
+    );
     let report = json(&result);
     assert_eq!(report["dry_run"], true);
     assert_eq!(report["manifest_written"], false);
@@ -292,7 +308,11 @@ fn patch_flags_that_need_a_spec_fail_cleanly_without_it() {
         "--dry-run",
     ]);
     assert!(!result.status.success());
-    assert!(stderr(&result).contains("require --spec"), "{}", stderr(&result));
+    assert!(
+        stderr(&result).contains("require --spec"),
+        "{}",
+        stderr(&result)
+    );
     assert!(!output.exists());
 }
 
@@ -334,13 +354,13 @@ fn unpatch_refuses_a_changed_patched_file() {
     changed[0x401] ^= 0xFF;
     std::fs::write(&output, &changed).unwrap();
 
-    let result = run(&[
-        "unpatch",
-        "--manifest",
-        manifest.to_str().unwrap(),
-    ]);
+    let result = run(&["unpatch", "--manifest", manifest.to_str().unwrap()]);
     assert!(!result.status.success());
-    assert!(stderr(&result).contains("SHA-256 mismatch"), "{}", stderr(&result));
+    assert!(
+        stderr(&result).contains("SHA-256 mismatch"),
+        "{}",
+        stderr(&result)
+    );
     assert_eq!(std::fs::read(&output).unwrap(), changed);
 }
 
@@ -394,7 +414,11 @@ fn in_place_patch_auto_backs_up_and_keeps_json_clean() {
         manifest.to_str().unwrap(),
         "--json",
     ]);
-    assert!(result.status.success(), "unpatch failed: {}", stderr(&result));
+    assert!(
+        result.status.success(),
+        "unpatch failed: {}",
+        stderr(&result)
+    );
     assert_eq!(std::fs::read(&game).unwrap(), original);
 }
 
@@ -472,7 +496,10 @@ fn custom_manifest_and_game_override_roundtrip() {
     ]);
     assert!(result.status.success(), "patch failed: {}", stderr(&result));
     let report = json(&result);
-    assert_eq!(PathBuf::from(report["manifest_path"].as_str().unwrap()), manifest);
+    assert_eq!(
+        PathBuf::from(report["manifest_path"].as_str().unwrap()),
+        manifest
+    );
     assert!(manifest.exists());
 
     let moved = dir.path().join("moved.exe");
@@ -485,6 +512,10 @@ fn custom_manifest_and_game_override_roundtrip() {
         moved.to_str().unwrap(),
         "--json",
     ]);
-    assert!(result.status.success(), "unpatch failed: {}", stderr(&result));
+    assert!(
+        result.status.success(),
+        "unpatch failed: {}",
+        stderr(&result)
+    );
     assert_eq!(std::fs::read(&moved).unwrap(), original);
 }

@@ -51,7 +51,11 @@ fn compare_reports_improvements_and_notes_short_runs() {
         "--patched",
         patched.to_str().unwrap(),
     ]);
-    assert!(output.status.success(), "compare failed: {}", stderr(&output));
+    assert!(
+        output.status.success(),
+        "compare failed: {}",
+        stderr(&output)
+    );
 
     let text = stdout(&output);
     assert!(text.contains("Baseline:"), "output: {}", text);
@@ -88,7 +92,11 @@ fn compare_json_is_machine_readable() {
         patched.to_str().unwrap(),
         "--json",
     ]);
-    assert!(output.status.success(), "compare failed: {}", stderr(&output));
+    assert!(
+        output.status.success(),
+        "compare failed: {}",
+        stderr(&output)
+    );
 
     let json: serde_json::Value =
         serde_json::from_str(&stdout(&output)).expect("stdout should be valid JSON");
@@ -116,7 +124,11 @@ fn compare_frames_trims_both_logs() {
         "--frames",
         "2",
     ]);
-    assert!(output.status.success(), "compare failed: {}", stderr(&output));
+    assert!(
+        output.status.success(),
+        "compare failed: {}",
+        stderr(&output)
+    );
 
     let text = stdout(&output);
     // Last two baseline frames: 10 ms + 20 ms -> 66.67 FPS.

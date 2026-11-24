@@ -89,8 +89,7 @@ pub fn create(path: &Path) -> Result<BackupRecord> {
         );
     }
 
-    let data = fs::read(&target)
-        .with_context(|| format!("Failed to read {}", target.display()))?;
+    let data = fs::read(&target).with_context(|| format!("Failed to read {}", target.display()))?;
     if data.is_empty() {
         bail!("Refusing to back up {}: file is empty", target.display());
     }
@@ -104,12 +103,7 @@ pub fn create(path: &Path) -> Result<BackupRecord> {
         .file_name()
         .and_then(|n| n.to_str())
         .context("Target path has no usable file name")?;
-    let backup_name = format!(
-        "{}.{}.{}.bak",
-        file_name,
-        &digest[..16],
-        now.as_nanos()
-    );
+    let backup_name = format!("{}.{}.{}.bak", file_name, &digest[..16], now.as_nanos());
     let backup_path = target.with_file_name(backup_name);
 
     // create_new guarantees we never clobber another backup.
@@ -126,13 +120,19 @@ pub fn create(path: &Path) -> Result<BackupRecord> {
     drop(backup_file);
     if let Err(error) = write_result {
         let _ = fs::remove_file(&backup_path);
-        return Err(error).with_context(|| {
-            format!("Failed to write backup {}", backup_path.display())
-        });
+        return Err(error)
+            .with_context(|| format!("Failed to write backup {}", backup_path.display()));
     }
 
-    // Preserve the original permissions on the backup copy.
-    let _ = fs::set_permissions(&backup_path, metadata.permissions());
+    // Preserve the original permissions on the backup copy. The bytes are
+    // already durable at this point, so a permission mismatch is reported but
+    // does not fail the backup.
+    if let Err(error) = fs::set_permissions(&backup_path, metadata.permissions()) {
+        warn!(
+            "Could not copy permissions to backup {}: {error}",
+            backup_path.display()
+        );
+    }
 
     #[cfg(unix)]
     let unix_mode = {
@@ -217,11 +217,7 @@ pub fn verify_record(record: &BackupRecord) -> Result<()> {
 ///
 /// With `manifest` unset the newest backup for the target is used.
 /// With `dry_run` nothing is written.
-pub fn restore(
-    target: &Path,
-    manifest: Option<&Path>,
-    dry_run: bool,
-) -> Result<RestoreReport> {
+pub fn restore(target: &Path, manifest: Option<&Path>, dry_run: bool) -> Result<RestoreReport> {
     let target = normalize(target)?;
 
     let record = match manifest {
@@ -263,8 +259,7 @@ pub fn restore(
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
-            return Err(error)
-                .with_context(|| format!("Cannot inspect {}", target.display()))
+            return Err(error).with_context(|| format!("Cannot inspect {}", target.display()))
         }
     }
 
@@ -272,8 +267,7 @@ pub fn restore(
         Ok(current) => Some(sha256_hex(&current)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
-            return Err(error)
-                .with_context(|| format!("Failed to read {}", target.display()))
+            return Err(error).with_context(|| format!("Failed to read {}", target.display()))
         }
     };
     let already_restored = before_hash.as_deref() == Some(record.sha256.as_str());
@@ -327,11 +321,7 @@ pub fn restore(
 ///
 /// Used for patched outputs as well as restores, so a crash never leaves a
 /// truncated executable behind.
-pub(crate) fn write_atomic(
-    path: &Path,
-    bytes: &[u8],
-    perms_from: Option<&Path>,
-) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8], perms_from: Option<&Path>) -> Result<()> {
     let parent = path
         .parent()
         .context("Output path has no parent directory")?;
@@ -363,15 +353,19 @@ pub(crate) fn write_atomic(
 
         if let Some(source) = perms_from {
             if let Ok(metadata) = fs::metadata(source) {
-                let _ = fs::set_permissions(&temp_path, metadata.permissions());
+                if let Err(error) = fs::set_permissions(&temp_path, metadata.permissions()) {
+                    warn!(
+                        "Could not copy permissions to {}: {error}",
+                        temp_path.display()
+                    );
+                }
             }
         }
 
         #[cfg(windows)]
         if path.exists() {
-            fs::remove_file(path).with_context(|| {
-                format!("Failed to replace existing {}", path.display())
-            })?;
+            fs::remove_file(path)
+                .with_context(|| format!("Failed to replace existing {}", path.display()))?;
         }
 
         fs::rename(&temp_path, path).with_context(|| {
@@ -381,10 +375,17 @@ pub(crate) fn write_atomic(
             )
         })?;
 
-        // Best-effort directory sync so the rename is durable.
+        // Sync the parent directory so the rename is durable. A failure here
+        // does not undo the write, but it means the new name might not survive
+        // a crash, so it must not be silent.
         #[cfg(unix)]
         if let Ok(directory) = File::open(parent) {
-            let _ = directory.sync_all();
+            if let Err(error) = directory.sync_all() {
+                warn!(
+                    "Could not sync directory {}; the rename may not be durable: {error}",
+                    parent.display()
+                );
+            }
         }
 
         Ok(())
@@ -397,9 +398,8 @@ pub(crate) fn write_atomic(
 }
 
 fn read_verified_backup(record: &BackupRecord) -> Result<Vec<u8>> {
-    let metadata = fs::symlink_metadata(&record.backup_path).with_context(|| {
-        format!("Backup is missing: {}", record.backup_path.display())
-    })?;
+    let metadata = fs::symlink_metadata(&record.backup_path)
+        .with_context(|| format!("Backup is missing: {}", record.backup_path.display()))?;
     if metadata.file_type().is_symlink() {
         bail!(
             "Backup {} is a symbolic link; refusing to read it",
@@ -511,10 +511,12 @@ fn load_manifest(path: &Path) -> Result<BackupRecord> {
 
 fn write_manifest(record: &BackupRecord) -> Result<()> {
     let manifest_path = record.manifest_path();
-    let json = serde_json::to_vec_pretty(record)
-        .context("Failed to serialize backup manifest")?;
+    let json = serde_json::to_vec_pretty(record).context("Failed to serialize backup manifest")?;
     write_atomic(&manifest_path, &json, None).with_context(|| {
-        format!("Failed to write backup manifest {}", manifest_path.display())
+        format!(
+            "Failed to write backup manifest {}",
+            manifest_path.display()
+        )
     })
 }
 
@@ -528,15 +530,11 @@ fn normalize(path: &Path) -> Result<PathBuf> {
             .context("Cannot determine current directory")?
             .join(path)
     };
-    let parent = absolute
-        .parent()
-        .context("Path has no parent directory")?;
+    let parent = absolute.parent().context("Path has no parent directory")?;
     let parent = parent
         .canonicalize()
         .with_context(|| format!("Directory not found: {}", parent.display()))?;
-    let file_name = absolute
-        .file_name()
-        .context("Path has no file name")?;
+    let file_name = absolute.file_name().context("Path has no file name")?;
     Ok(parent.join(file_name))
 }
 

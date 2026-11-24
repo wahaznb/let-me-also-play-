@@ -204,11 +204,7 @@ fn read_cache(dir: &Path, identity: &CacheIdentity) -> Option<Vec<FunctionSummar
     cached.matches(identity).then_some(cached.functions)
 }
 
-fn write_cache(
-    dir: &Path,
-    identity: &CacheIdentity,
-    functions: &[FunctionSummary],
-) -> Result<()> {
+fn write_cache(dir: &Path, identity: &CacheIdentity, functions: &[FunctionSummary]) -> Result<()> {
     fs::create_dir_all(dir)
         .with_context(|| format!("Failed to create function cache {}", dir.display()))?;
     let key = identity.cache_key();
@@ -245,9 +241,7 @@ pub async fn load_function_map(game_path: &Path, refresh: bool) -> Result<Functi
     };
 
     if functions.is_none() {
-        info!(
-            "Building function map with Ghidra (first run for this binary; this can take ~30s)"
-        );
+        info!("Building function map with Ghidra (first run for this binary; this can take ~30s)");
         let game = GameInfo::from_path(&identity.path)?;
         let decompiler = Decompiler::new()?;
         let listed = decompiler.list_functions(&game).await?;

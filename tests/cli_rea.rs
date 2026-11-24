@@ -58,8 +58,7 @@ fn pe64() -> Vec<u8> {
     data[optional + 4..optional + 8].copy_from_slice(&0x200u32.to_le_bytes());
     data[optional + 16..optional + 20].copy_from_slice(&0x1000u32.to_le_bytes());
     data[optional + 20..optional + 24].copy_from_slice(&0x1000u32.to_le_bytes());
-    data[optional + 24..optional + 32]
-        .copy_from_slice(&0x0000_0001_4000_0000u64.to_le_bytes());
+    data[optional + 24..optional + 32].copy_from_slice(&0x0000_0001_4000_0000u64.to_le_bytes());
     data[optional + 32..optional + 36].copy_from_slice(&0x1000u32.to_le_bytes());
     data[optional + 36..optional + 40].copy_from_slice(&0x200u32.to_le_bytes());
     data[optional + 56..optional + 60].copy_from_slice(&0x2000u32.to_le_bytes());
@@ -171,7 +170,10 @@ fn rea_apply_then_revert_restores_exact_bytes() {
     ]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let report = json(&output);
-    assert_eq!(report["notes"][0], "Applied 2 patch(es) from REA candidates.");
+    assert_eq!(
+        report["notes"][0],
+        "Applied 2 patch(es) from REA candidates."
+    );
     assert!(patched.exists());
     assert!(manifest.exists());
 

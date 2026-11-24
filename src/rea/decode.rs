@@ -61,7 +61,12 @@ impl DecodedInsn {
 ///
 /// `bitness` must match the PE machine (32 or 64). Decoding stops at
 /// `max_bytes` so a huge section cannot be scanned unbounded.
-pub fn linear_sweep(bytes: &[u8], base_ip: u64, bitness: u32, max_bytes: usize) -> Vec<DecodedInsn> {
+pub fn linear_sweep(
+    bytes: &[u8],
+    base_ip: u64,
+    bitness: u32,
+    max_bytes: usize,
+) -> Vec<DecodedInsn> {
     let limit = max_bytes.min(bytes.len());
     let mut out = Vec::new();
     if limit == 0 {

@@ -51,12 +51,20 @@ fn profile_computes_real_frame_time_metrics() {
         "--log",
         log.to_str().unwrap(),
     ]);
-    assert!(output.status.success(), "profile failed: {}", stderr(&output));
+    assert!(
+        output.status.success(),
+        "profile failed: {}",
+        stderr(&output)
+    );
 
     let text = stdout(&output);
     assert!(text.contains("Frames: 4 (0.05s)"), "output: {}", text);
     assert!(text.contains("Average FPS: 80.00"), "output: {}", text);
-    assert!(text.contains("Min / max FPS: 50.00 / 100.00"), "output: {}", text);
+    assert!(
+        text.contains("Min / max FPS: 50.00 / 100.00"),
+        "output: {}",
+        text
+    );
     assert!(text.contains("1% low FPS: 50.00"), "output: {}", text);
     assert!(text.contains("0.1% low FPS: 50.00"), "output: {}", text);
     assert!(text.contains("Frame time avg / median: 12.50ms / 10.00ms"));
@@ -81,7 +89,11 @@ fn profile_frames_flag_analyzes_only_the_tail() {
         "--frames",
         "2",
     ]);
-    assert!(output.status.success(), "profile failed: {}", stderr(&output));
+    assert!(
+        output.status.success(),
+        "profile failed: {}",
+        stderr(&output)
+    );
 
     let text = stdout(&output);
     // Last two frames are 10 ms and 20 ms: 15 ms average, 66.67 FPS.
@@ -103,15 +115,22 @@ fn profile_json_output_is_machine_readable() {
         log.to_str().unwrap(),
         "--json",
     ]);
-    assert!(output.status.success(), "profile failed: {}", stderr(&output));
+    assert!(
+        output.status.success(),
+        "profile failed: {}",
+        stderr(&output)
+    );
 
-    let json: serde_json::Value = serde_json::from_str(&stdout(&output))
-        .expect("stdout should be valid JSON");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout(&output)).expect("stdout should be valid JSON");
     let stats = &json["stats"];
     assert_eq!(stats["frame_count"], 4);
     assert!((stats["avg_fps"].as_f64().unwrap() - 80.0).abs() < 1e-9);
     assert!((stats["low_1pct_fps"].as_f64().unwrap() - 50.0).abs() < 1e-9);
-    assert!(json["source"].as_str().unwrap().ends_with("MangoHud_json.csv"));
+    assert!(json["source"]
+        .as_str()
+        .unwrap()
+        .ends_with("MangoHud_json.csv"));
 }
 
 #[test]
@@ -119,17 +138,9 @@ fn profile_discovers_newest_log_in_directory() {
     let dir = tempfile::tempdir().unwrap();
     let game = make_game(dir.path());
 
-    make_log(
-        dir.path(),
-        "older.csv",
-        "fps,frametime\n100,10\n100,10\n",
-    );
+    make_log(dir.path(), "older.csv", "fps,frametime\n100,10\n100,10\n");
     std::thread::sleep(std::time::Duration::from_millis(20));
-    let newest = make_log(
-        dir.path(),
-        "newest.csv",
-        "fps,frametime\n100,20\n100,20\n",
-    );
+    let newest = make_log(dir.path(), "newest.csv", "fps,frametime\n100,20\n100,20\n");
     // A normal CSV must not be mistaken for a MangoHud log.
     make_log(dir.path(), "notes.csv", "a,b\n1,2\n");
 
@@ -140,7 +151,11 @@ fn profile_discovers_newest_log_in_directory() {
         "--log-dir",
         dir.path().to_str().unwrap(),
     ]);
-    assert!(output.status.success(), "profile failed: {}", stderr(&output));
+    assert!(
+        output.status.success(),
+        "profile failed: {}",
+        stderr(&output)
+    );
 
     let text = stdout(&output);
     assert!(
@@ -206,7 +221,11 @@ fn analyze_summarizes_a_real_log() {
         "--log",
         log.to_str().unwrap(),
     ]);
-    assert!(output.status.success(), "analyze failed: {}", stderr(&output));
+    assert!(
+        output.status.success(),
+        "analyze failed: {}",
+        stderr(&output)
+    );
 
     let text = stdout(&output);
     assert!(text.contains("Detected game:"), "output: {}", text);
@@ -253,10 +272,18 @@ fn analyze_without_any_log_suggests_mangohud_command() {
         .args(["analyze", "--game", game.to_str().unwrap()])
         .output()
         .expect("failed to run game-opt-tool");
-    assert!(output.status.success(), "analyze failed: {}", stderr(&output));
+    assert!(
+        output.status.success(),
+        "analyze failed: {}",
+        stderr(&output)
+    );
 
     let text = stdout(&output);
-    assert!(text.contains("No measurement log found"), "output: {}", text);
+    assert!(
+        text.contains("No measurement log found"),
+        "output: {}",
+        text
+    );
     assert!(text.contains("MANGOHUD_CONFIG"), "output: {}", text);
     assert!(text.contains("--log-dir"), "output: {}", text);
 }

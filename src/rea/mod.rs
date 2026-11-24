@@ -14,8 +14,8 @@
 //! positive; the report says so and the user should review addresses before
 //! applying to a shipping binary.
 
-pub mod decode;
 pub mod candidates;
+pub mod decode;
 pub mod patch;
 
 use crate::game::GameInfo;
@@ -152,8 +152,14 @@ pub fn analyze(
     report.candidates_total = all_candidates.len();
     report.candidates = all_candidates.clone();
     for c in &all_candidates {
-        *report.candidates_by_kind.entry(c.kind.as_str().to_string()).or_insert(0) += 1;
-        *report.candidates_by_class.entry(c.class().to_string()).or_insert(0) += 1;
+        *report
+            .candidates_by_kind
+            .entry(c.kind.as_str().to_string())
+            .or_insert(0) += 1;
+        *report
+            .candidates_by_class
+            .entry(c.class().to_string())
+            .or_insert(0) += 1;
     }
 
     Ok((all_candidates, report))

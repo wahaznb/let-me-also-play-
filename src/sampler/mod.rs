@@ -23,9 +23,9 @@ mod process;
 
 #[cfg(target_os = "linux")]
 use crate::game::GameInfo;
-use anyhow::{bail, Result};
 #[cfg(target_os = "linux")]
 use anyhow::Context;
+use anyhow::{bail, Result};
 use serde::Serialize;
 #[cfg(target_os = "linux")]
 use std::collections::HashMap;
@@ -165,8 +165,7 @@ impl SampleReport {
         }
         if raw.elapsed_secs > 0.0 && raw.elapsed_secs < 1.0 {
             warnings.push(
-                "The sampling window was shorter than 1 second; percentages are noisy."
-                    .to_string(),
+                "The sampling window was shorter than 1 second; percentages are noisy.".to_string(),
             );
         }
         if total < 100 {
@@ -207,10 +206,7 @@ impl SampleReport {
             functions_with_samples = function_counts.len();
             let mut ranked: Vec<(usize, u64)> = function_counts.into_iter().collect();
             ranked.sort_by_key(|(index, count)| {
-                (
-                    std::cmp::Reverse(*count),
-                    map.spans()[*index].address,
-                )
+                (std::cmp::Reverse(*count), map.spans()[*index].address)
             });
             for (index, count) in ranked.into_iter().take(top) {
                 let span = &map.spans()[index];
@@ -252,7 +248,9 @@ impl SampleReport {
                     address: module
                         .ghidra_address(module.base.saturating_add(rva))
                         .map(|address| format!("0x{address:X}"))
-                        .unwrap_or_else(|| format!("0x{:X}", module.image_base.saturating_add(rva))),
+                        .unwrap_or_else(|| {
+                            format!("0x{:X}", module.image_base.saturating_add(rva))
+                        }),
                     offset: format!("0x{rva:X}"),
                     samples: count,
                     game_percent: if game_samples == 0 {
@@ -489,12 +487,10 @@ mod tests {
         assert_eq!(report.top_offsets.len(), 2);
         assert_eq!(report.top_offsets[0].address, "0x1000");
         assert_eq!(report.top_offsets[0].offset, "0x0");
-        assert!(
-            report
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("Function names were not resolved"))
-        );
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Function names were not resolved")));
     }
 
     #[test]
@@ -502,12 +498,10 @@ mod tests {
         let raw = raw(&[(0x7000_0000, 5)]);
         let report = SampleReport::build(target(), module(), raw, None, 10);
         assert_eq!(report.game_samples, 0);
-        assert!(
-            report
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("No samples landed in the game module"))
-        );
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("No samples landed in the game module")));
     }
 
     #[test]

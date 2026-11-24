@@ -119,9 +119,7 @@ impl PeInfo {
         let number_of_sections = read_u16(data, coff_offset + 2)?;
         let optional_header_size = read_u16(data, coff_offset + 16)?;
         if number_of_sections == 0 || number_of_sections > MAX_SECTIONS {
-            bail!(
-                "Invalid section count {number_of_sections} (expected 1..={MAX_SECTIONS})"
-            );
+            bail!("Invalid section count {number_of_sections} (expected 1..={MAX_SECTIONS})");
         }
 
         let optional_header_offset = coff_offset
@@ -195,8 +193,7 @@ impl PeInfo {
         } else {
             read_u32(data, optional_header_offset + 92)?
         };
-        let data_directory_offset = optional_header_offset
-            + if is_64 { 112 } else { 96 };
+        let data_directory_offset = optional_header_offset + if is_64 { 112 } else { 96 };
         if data_directory_offset > optional_header_end {
             bail!("Optional header is too small for the data-directory count");
         }
@@ -251,8 +248,7 @@ impl PeInfo {
                     "Section {name:?} raw data starts at 0x{raw_offset:X}, inside SizeOfHeaders 0x{size_of_headers:X}"
                 );
             }
-            let virtual_end = u64::from(virtual_address)
-                + u64::from(virtual_size.max(raw_size));
+            let virtual_end = u64::from(virtual_address) + u64::from(virtual_size.max(raw_size));
             if virtual_end > u64::from(size_of_image) {
                 bail!(
                     "Section {name:?} virtual range ends at 0x{virtual_end:X}, past SizeOfImage 0x{size_of_image:X}"
@@ -430,14 +426,14 @@ impl PeInfo {
         let raw_size = u32::try_from(raw_size).context("New section raw size exceeds 32 bits")?;
         let raw_offset32 =
             u32::try_from(raw_offset).context("New section file offset exceeds 32 bits")?;
-        let virtual_size = u32::try_from(content_len)
-            .context("New section virtual size exceeds 32 bits")?;
+        let virtual_size =
+            u32::try_from(content_len).context("New section virtual size exceeds 32 bits")?;
         let image_end = u64::from(virtual_address)
             .checked_add(u64::from(virtual_size))
             .context("New section image range overflows")?;
         let size_of_image = align_up_u64(image_end, u64::from(self.section_alignment))?;
-        let size_of_image = u32::try_from(size_of_image)
-            .context("New SizeOfImage exceeds 32 bits")?;
+        let size_of_image =
+            u32::try_from(size_of_image).context("New SizeOfImage exceeds 32 bits")?;
         let size_of_code = self
             .size_of_code
             .checked_add(raw_size)
@@ -806,7 +802,10 @@ mod tests {
             &[0xCC, 0x90, 0x90, 0xC3]
         );
         assert_eq!(reparsed.size_of_image, 0x3000);
-        assert_eq!(reparsed.checksum, compute_checksum(&data, reparsed.checksum_offset).unwrap());
+        assert_eq!(
+            reparsed.checksum,
+            compute_checksum(&data, reparsed.checksum_offset).unwrap()
+        );
     }
 
     #[test]
@@ -825,7 +824,10 @@ mod tests {
         let coff = 0x84;
         data[coff + 16..coff + 18].copy_from_slice(&0x40u16.to_le_bytes());
         let error = PeInfo::parse(&data).unwrap_err().to_string();
-        assert!(error.contains("Optional header is too small"), "error: {error}");
+        assert!(
+            error.contains("Optional header is too small"),
+            "error: {error}"
+        );
     }
 
     #[test]
@@ -855,7 +857,9 @@ mod tests {
             .add_section(&mut data, &plan, &[0xCC, 0x90, 0x90, 0xC3])
             .unwrap_err()
             .to_string();
-        assert!(error.contains("overlaps existing file data"), "error: {error}");
+        assert!(
+            error.contains("overlaps existing file data"),
+            "error: {error}"
+        );
     }
-
 }

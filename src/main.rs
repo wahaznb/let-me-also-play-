@@ -4,18 +4,18 @@
 //! executables. Every change is guarded by the scanned bytes and recorded in a
 //! manifest that can undo it exactly.
 
-mod config;
-mod game;
-mod profiler;
-mod decompiler;
-mod patcher;
-mod verifier;
 mod backup;
+mod config;
+mod decompiler;
+mod game;
 mod hash;
 mod mcp;
-mod sampler;
+mod patcher;
+mod profiler;
 pub mod rea;
+mod sampler;
 pub mod targets;
+mod verifier;
 
 use anyhow::{bail, Context, Result};
 use clap::CommandFactory;
@@ -23,7 +23,7 @@ use clap::Parser;
 use patcher::PatchReport;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use tracing::{info, error};
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -305,30 +305,48 @@ enum Command {
         /// Port to bind when --transport http
         #[arg(long, default_value = "9000")]
         port: u16,
+
+        /// Allow binding the HTTP transport to a non-loopback address
+        #[arg(long)]
+        allow_remote: bool,
     },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing. Logs go to stderr; data goes to stdout.
+    init_tracing()?;
+
+    let cli = Cli::parse();
+    dispatch(cli).await
+}
+
+/// Install the stderr logger. Data-producing commands keep stdout clean.
+fn init_tracing() -> Result<()> {
     let subscriber = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
+    Ok(())
+}
 
-    let cli = Cli::parse();
-
+/// Route one parsed command to its handler.
+async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
         Some(Command::Analyze { game, log, log_dir }) => {
             info!("Analyzing game: {:?}", game);
             analyze_game(&game, log.as_deref(), log_dir.as_deref())?;
         }
-        Some(Command::Profile { game, log, log_dir, frames, json }) => {
+        Some(Command::Profile {
+            game,
+            log,
+            log_dir,
+            frames,
+            json,
+        }) => {
             info!("Profiling game: {:?}", game);
             profile_game(
                 &game,
@@ -351,28 +369,35 @@ async fn main() -> Result<()> {
         }) => {
             info!("Sampling game: {:?}", game);
             sample_command(
-                &game,
-                pid,
-                process.as_deref(),
-                duration,
-                frequency,
-                top as usize,
-                !no_ghidra,
-                refresh_functions,
+                sampler::SampleConfig {
+                    game: game.clone(),
+                    pid,
+                    process,
+                    duration: std::time::Duration::from_secs(duration),
+                    frequency,
+                    top: top as usize,
+                    refresh_functions,
+                    resolve_functions: !no_ghidra,
+                },
                 json,
             )
             .await?;
         }
-        Some(Command::Compare { baseline, patched, frames, json }) => {
+        Some(Command::Compare {
+            baseline,
+            patched,
+            frames,
+            json,
+        }) => {
             info!("Comparing logs: {:?} vs {:?}", baseline, patched);
-            compare_command(
-                &baseline,
-                &patched,
-                frames as usize,
-                json,
-            )?;
+            compare_command(&baseline, &patched, frames as usize, json)?;
         }
-        Some(Command::Decompile { game, address, assembly, json }) => {
+        Some(Command::Decompile {
+            game,
+            address,
+            assembly,
+            json,
+        }) => {
             info!("Decompiling game: {:?}", game);
             decompile_game(&game, address.as_deref(), assembly, json).await?;
         }
@@ -438,7 +463,7 @@ async fn main() -> Result<()> {
         }
         Some(Command::Verify { original, patched }) => {
             info!("Verifying: {:?} vs {:?}", original, patched);
-            
+
             if is_deus_ex(&original) {
                 verify_deus_ex(&original, &patched).await?;
             } else {
@@ -448,7 +473,11 @@ async fn main() -> Result<()> {
         Some(Command::Backup { game, list, verify }) => {
             backup_command(&game, list, verify)?;
         }
-        Some(Command::Revert { game, backup, dry_run }) => {
+        Some(Command::Revert {
+            game,
+            backup,
+            dry_run,
+        }) => {
             revert_command(&game, backup.as_deref(), dry_run)?;
         }
         Some(Command::Doctor { game }) => {
@@ -464,13 +493,12 @@ async fn main() -> Result<()> {
             transport,
             host,
             port,
-        }) => {
-            match transport.as_str() {
-                "stdio" => mcp::run_stdio().await?,
-                "http" => mcp::run_http(&host, port).await?,
-                other => bail!("Unsupported MCP transport: {other}"),
-            }
-        }
+            allow_remote,
+        }) => match transport.as_str() {
+            "stdio" => mcp::run_stdio().await?,
+            "http" => mcp::run_http(&host, port, allow_remote).await?,
+            other => bail!("Unsupported MCP transport: {other}"),
+        },
         None => {
             Cli::command().print_help()?;
             println!("\nTry: game-opt-tool --help");
@@ -490,54 +518,23 @@ async fn rea_command(
     revert: bool,
     json: bool,
 ) -> Result<()> {
-    use patcher::Patcher;
     use rea::{analyze, patch::build_patch_spec};
 
     if revert {
-        let manifest_path = manifest.ok_or_else(|| {
-            anyhow::anyhow!("--revert requires --manifest <patch-manifest.json>")
-        })?;
-        let report = Patcher::unpatch(manifest_path, Some(game), false)?;
-        if json {
-            println!("{}", serde_json::to_string_pretty(&report)?);
-            return Ok(());
-        }
-        println!(
-            "Reverted {} byte patch(es) and {} code section(s).",
-            report.patches_reverted, report.sections_removed
-        );
-        println!("  target:  {}", report.target.display());
-        println!("  before:  {}", report.output_sha256);
-        println!("  after:   {}", report.restored_sha256);
-        return Ok(());
+        return rea_revert(game, manifest, json);
     }
 
     let game_info = game::GameInfo::from_path(game)?;
     let (candidates, mut report) = analyze(&game_info, max_bytes)?;
 
     if !json {
-        println!("=== REA: static analysis ===");
-        println!("Game:       {}", game_info.name);
-        println!("Executable: {}", game_info.path.display());
-        println!("Format:     {:?}", game_info.binary_format);
-        println!("Arch:       {}", game_info.architecture);
-        println!();
-
-        for section in &report.sections_scanned {
-            println!(
-                "  {:<12} VA 0x{:X}  {} bytes  {} insns  {} data  {} candidates",
-                section.name,
-                section.va,
-                section.bytes,
-                section.instructions,
-                section.data_skips,
-                section.candidates
-            );
-        }
+        print_rea_scan(&game_info, &report);
     }
 
     if report.candidates_total == 0 {
-        report.notes.push("No candidates; nothing to patch.".to_string());
+        report
+            .notes
+            .push("No candidates; nothing to patch.".to_string());
         if json {
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {
@@ -547,15 +544,7 @@ async fn rea_command(
     }
 
     if !json {
-        println!("\nCandidates ({}):", report.candidates_total);
-        for c in &report.candidates {
-            println!("  0x{:X}  {:<12} {}", c.address, c.kind.as_str(), c.reason);
-        }
-        println!();
-        println!(
-            "  dead_code: {}",
-            report.candidates_by_class.get("dead_code").copied().unwrap_or(0)
-        );
+        print_rea_candidates(&report);
     }
 
     let target_sha256 = Some(crate::hash::sha256_hex(&std::fs::read(&game_info.path)?));
@@ -570,7 +559,9 @@ async fn rea_command(
     )?;
 
     let Some(spec) = spec else {
-        report.notes.push("No candidates after validation.".to_string());
+        report
+            .notes
+            .push("No candidates after validation.".to_string());
         if json {
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
@@ -598,28 +589,8 @@ async fn rea_command(
         }
         return Ok(());
     };
-    let output_path = output.to_path_buf();
-    let manifest_path = manifest.map(|p| p.to_path_buf());
 
-    let spec_path = std::env::temp_dir().join(format!(
-        "rea-{}-{}.spec.json",
-        std::process::id(),
-        game_info.path.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    std::fs::write(&spec_path, &spec_json)?;
-
-    let apply_result = patch_with_spec(
-        &game_info.path,
-        &output_path,
-        &spec_path,
-        manifest_path.as_deref(),
-        false,
-        json,
-        json,
-    );
-    let _ = std::fs::remove_file(&spec_path);
-
-    let patch_report = apply_result?;
+    let patch_report = apply_rea_spec(&game_info.path, output, manifest, &spec_json, json).await?;
     report.patch_path = Some(patch_report.output_path.display().to_string());
     report.manifest_path = Some(patch_report.manifest_path.display().to_string());
     report.notes.push(format!(
@@ -642,6 +613,88 @@ async fn rea_command(
         );
     }
     Ok(())
+}
+
+/// Revert a previously applied REA patch from its manifest.
+fn rea_revert(game: &Path, manifest: Option<&Path>, json: bool) -> Result<()> {
+    use patcher::Patcher;
+
+    let manifest_path = manifest
+        .ok_or_else(|| anyhow::anyhow!("--revert requires --manifest <patch-manifest.json>"))?;
+    let report = Patcher::unpatch(manifest_path, Some(game), false)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    println!(
+        "Reverted {} byte patch(es) and {} code section(s).",
+        report.patches_reverted, report.sections_removed
+    );
+    println!("  target:  {}", report.target.display());
+    println!("  before:  {}", report.output_sha256);
+    println!("  after:   {}", report.restored_sha256);
+    Ok(())
+}
+
+/// Print the per-section scan summary.
+fn print_rea_scan(game_info: &game::GameInfo, report: &rea::ReaReport) {
+    println!("=== REA: static analysis ===");
+    println!("Game:       {}", game_info.name);
+    println!("Executable: {}", game_info.path.display());
+    println!("Format:     {:?}", game_info.binary_format);
+    println!("Arch:       {}", game_info.architecture);
+    println!();
+
+    for section in &report.sections_scanned {
+        println!(
+            "  {:<12} VA 0x{:X}  {} bytes  {} insns  {} data  {} candidates",
+            section.name,
+            section.va,
+            section.bytes,
+            section.instructions,
+            section.data_skips,
+            section.candidates
+        );
+    }
+}
+
+/// Print the candidate list.
+fn print_rea_candidates(report: &rea::ReaReport) {
+    println!("\nCandidates ({}):", report.candidates_total);
+    for c in &report.candidates {
+        println!("  0x{:X}  {:<12} {}", c.address, c.kind.as_str(), c.reason);
+    }
+    println!();
+    println!(
+        "  dead_code: {}",
+        report
+            .candidates_by_class
+            .get("dead_code")
+            .copied()
+            .unwrap_or(0)
+    );
+}
+
+/// Apply a generated spec to a copy, using a short-lived temp file because the
+/// patcher reads specs from disk.
+async fn apply_rea_spec(
+    game_path: &Path,
+    output: &Path,
+    manifest: Option<&Path>,
+    spec_json: &str,
+    json: bool,
+) -> Result<PatchReport> {
+    let spec_path = std::env::temp_dir().join(format!(
+        "rea-{}-{}.spec.json",
+        std::process::id(),
+        game_path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    tokio::fs::write(&spec_path, spec_json).await?;
+
+    let result = patch_with_spec(game_path, output, &spec_path, manifest, false, json, json);
+    let _ = tokio::fs::remove_file(&spec_path).await;
+
+    result
 }
 
 fn is_deus_ex(path: &Path) -> bool {
@@ -718,13 +771,7 @@ fn patch_with_spec(
     }
 
     let patcher = Patcher::new();
-    let report = patcher.apply_spec(
-        game_path,
-        output_path,
-        &spec,
-        manifest_path,
-        dry_run,
-    )?;
+    let report = patcher.apply_spec(game_path, output_path, &spec, manifest_path, dry_run)?;
 
     if quiet {
         return Ok(report);
@@ -802,22 +849,22 @@ fn unpatch_command(
 
 async fn verify_deus_ex(original: &Path, patched: &Path) -> Result<()> {
     use verifier::Verifier;
-    
+
     let verifier = Verifier::new();
     let report = verifier.verify(original, patched).await?;
-    
+
     println!("\n=== Verification Report ===");
     for detail in &report.details {
         println!("{}", detail);
     }
-    
+
     if report.launched_successfully && report.gameplay_unchanged && report.quirks_preserved {
         println!("\n✓ Verification PASSED");
     } else {
         println!("\n✗ Verification FAILED");
         std::process::exit(1);
     }
-    
+
     Ok(())
 }
 
@@ -893,9 +940,7 @@ fn analyze_game(
             );
             println!("    mangohud --dlsym wine DeusEx.exe");
             println!();
-            println!(
-                "Then: game-opt-tool analyze --game <exe> --log-dir /tmp/mangohud"
-            );
+            println!("Then: game-opt-tool analyze --game <exe> --log-dir /tmp/mangohud");
         }
     }
 
@@ -928,30 +973,8 @@ fn profile_game(
     Ok(())
 }
 
-async fn sample_command(
-    game_path: &Path,
-    pid: Option<u32>,
-    process: Option<&str>,
-    duration_secs: u64,
-    frequency: u32,
-    top: usize,
-    resolve_functions: bool,
-    refresh_functions: bool,
-    json: bool,
-) -> Result<()> {
-    use sampler::{run, SampleConfig};
-
-    let config = SampleConfig {
-        game: game_path.to_path_buf(),
-        pid,
-        process: process.map(str::to_string),
-        duration: std::time::Duration::from_secs(duration_secs),
-        frequency,
-        top,
-        refresh_functions,
-        resolve_functions,
-    };
-    let report = run(config).await?;
+async fn sample_command(config: sampler::SampleConfig, json: bool) -> Result<()> {
+    let report = sampler::run(config).await?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -964,11 +987,7 @@ async fn sample_command(
 fn print_sample_report(report: &sampler::SampleReport) {
     println!(
         "CPU sampling: PID {} ({}), {:.2}s at {} Hz, {} thread(s) started",
-        report.pid,
-        report.process,
-        report.duration_secs,
-        report.frequency_hz,
-        report.threads
+        report.pid, report.process, report.duration_secs, report.frequency_hz, report.threads
     );
     println!("Game: {}", report.game);
     println!(
@@ -1090,12 +1109,7 @@ fn print_profile(results: &profiler::ProfileResults) {
     println!("Stutter ratio (p99 / median): {:.2}x", stats.stutter_ratio);
 }
 
-fn compare_command(
-    baseline: &Path,
-    patched: &Path,
-    tail_frames: usize,
-    json: bool,
-) -> Result<()> {
+fn compare_command(baseline: &Path, patched: &Path, tail_frames: usize, json: bool) -> Result<()> {
     use profiler::Profiler;
 
     let profiler = Profiler::new();
@@ -1220,10 +1234,7 @@ async fn decompile_game(
     Ok(())
 }
 
-async fn patch_game(
-    game_path: &std::path::Path,
-    output_path: &std::path::Path,
-) -> Result<()> {
+async fn patch_game(game_path: &std::path::Path, output_path: &std::path::Path) -> Result<()> {
     use patcher::Patcher;
 
     println!(
@@ -1239,10 +1250,7 @@ async fn patch_game(
     Ok(())
 }
 
-async fn verify_optimization(
-    original: &std::path::Path,
-    patched: &std::path::Path,
-) -> Result<()> {
+async fn verify_optimization(original: &std::path::Path, patched: &std::path::Path) -> Result<()> {
     use verifier::Verifier;
 
     let verifier = Verifier::new();
@@ -1252,7 +1260,10 @@ async fn verify_optimization(
     println!("  Behavioral match: {}", report.behavioral_match);
     println!("  Frame difference: {:.4}%", report.frame_diff_percent);
     println!("  Quirks preserved: {}", report.quirks_preserved);
-    println!("  Performance gain (measured): {:.1}%", report.performance_gain_pct);
+    println!(
+        "  Performance gain (measured): {:.1}%",
+        report.performance_gain_pct
+    );
 
     if report.behavioral_match && report.quirks_preserved {
         info!("\n✓ Verification PASSED");
@@ -1343,8 +1354,8 @@ fn backup_command(path: &Path, list: bool, verify: bool) -> Result<()> {
         return Ok(());
     }
 
-    let record = backup::create(path)
-        .with_context(|| format!("Failed to back up {}", path.display()))?;
+    let record =
+        backup::create(path).with_context(|| format!("Failed to back up {}", path.display()))?;
     println!("Backup created:");
     println!("  original: {}", record.original_path.display());
     println!("  backup:   {}", record.backup_path.display());
@@ -1358,11 +1369,7 @@ fn backup_command(path: &Path, list: bool, verify: bool) -> Result<()> {
     Ok(())
 }
 
-fn revert_command(
-    path: &Path,
-    manifest: Option<&Path>,
-    dry_run: bool,
-) -> Result<()> {
+fn revert_command(path: &Path, manifest: Option<&Path>, dry_run: bool) -> Result<()> {
     let report = backup::restore(path, manifest, dry_run)?;
 
     if report.already_restored {
@@ -1388,10 +1395,7 @@ fn revert_command(
         return Ok(());
     }
 
-    println!(
-        "Restored {} from verified backup",
-        report.target.display()
-    );
+    println!("Restored {} from verified backup", report.target.display());
     println!("  before: {}", before);
     println!("  after:  {} (verified)", short_hash(&report.after_hash));
     Ok(())
@@ -1447,9 +1451,7 @@ fn doctor_command(game: Option<&Path>) -> Result<()> {
     println!();
     println!("CPU sampling:");
     match sampler::probe_sampling() {
-        Ok(()) => println!(
-            "[ok]   perf_event_open: user-space CPU sampling is available"
-        ),
+        Ok(()) => println!("[ok]   perf_event_open: user-space CPU sampling is available"),
         Err(error) => {
             println!("[warn] sampling: {error}");
             warnings += 1;
@@ -1514,9 +1516,7 @@ fn doctor_command(game: Option<&Path>) -> Result<()> {
         }
         None => {
             if java_home.is_none() {
-                println!(
-                    "[warn] java: not found on PATH (Ghidra headless decompilation)"
-                );
+                println!("[warn] java: not found on PATH (Ghidra headless decompilation)");
                 warnings += 1;
             }
         }
@@ -1560,10 +1560,9 @@ fn doctor_command(game: Option<&Path>) -> Result<()> {
                 println!("       executable: {}", detected.path.display());
 
                 match detected.path.parent() {
-                    Some(dir) if check_writable(dir) => println!(
-                        "[ok]   backups: directory is writable: {}",
-                        dir.display()
-                    ),
+                    Some(dir) if check_writable(dir) => {
+                        println!("[ok]   backups: directory is writable: {}", dir.display())
+                    }
                     Some(dir) => {
                         println!(
                             "[fail] backups: directory is not writable: {}",
@@ -1579,7 +1578,9 @@ fn doctor_command(game: Option<&Path>) -> Result<()> {
 
                 match backup::list_backups(&detected.path) {
                     Ok(records) if records.is_empty() => {
-                        println!("[warn] backups: none yet (run: game-opt-tool backup --game <exe>)")
+                        println!(
+                            "[warn] backups: none yet (run: game-opt-tool backup --game <exe>)"
+                        )
                     }
                     Ok(records) => println!(
                         "[ok]   backups: {} available (newest {})",
@@ -1631,10 +1632,7 @@ fn find_in_path(binary: &str) -> Option<PathBuf> {
 }
 
 fn check_writable(dir: &Path) -> bool {
-    let probe = dir.join(format!(
-        ".game-opt-tool-write-test-{}",
-        std::process::id()
-    ));
+    let probe = dir.join(format!(".game-opt-tool-write-test-{}", std::process::id()));
 
     match std::fs::OpenOptions::new()
         .write(true)

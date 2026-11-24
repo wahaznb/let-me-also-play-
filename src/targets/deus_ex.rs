@@ -16,18 +16,12 @@ impl DeusExInfo {
         let data = std::fs::read(game_path).context("Failed to read game path")?;
 
         if data.len() >= 0x40 && data[0..2] == *b"MZ" {
-            let pe_offset = u32::from_le_bytes([
-                data[0x3C],
-                data[0x3D],
-                data[0x3E],
-                data[0x3F],
-            ]) as usize;
+            let pe_offset =
+                u32::from_le_bytes([data[0x3C], data[0x3D], data[0x3E], data[0x3F]]) as usize;
 
             if pe_offset >= 0x40 {
                 if let Some(signature_end) = pe_offset.checked_add(4) {
-                    if signature_end <= data.len()
-                        && &data[pe_offset..signature_end] == b"PE\0\0"
-                    {
+                    if signature_end <= data.len() && &data[pe_offset..signature_end] == b"PE\0\0" {
                         return Ok(DeusExInfo);
                     }
                 }

@@ -34,11 +34,7 @@ impl Verifier {
     }
 
     /// Verify a patched game against the original.
-    pub async fn verify(
-        &self,
-        original: &Path,
-        patched: &Path,
-    ) -> Result<VerificationReport> {
+    pub async fn verify(&self, original: &Path, patched: &Path) -> Result<VerificationReport> {
         info!("Starting verification...");
         info!("  Original: {:?}", original);
         info!("  Patched:  {:?}", patched);
@@ -70,9 +66,7 @@ impl Verifier {
 
         if identical {
             details.push("Byte comparison: IDENTICAL".to_string());
-            details.push(
-                "Behavioral equivalence: guaranteed (no bytes were changed)".to_string(),
-            );
+            details.push("Behavioral equivalence: guaranteed (no bytes were changed)".to_string());
             details.push("Performance gain: 0.0% (no bytes were changed)".to_string());
 
             Ok(VerificationReport {
@@ -90,8 +84,7 @@ impl Verifier {
                 .zip(patched_bytes.iter())
                 .filter(|(a, b)| a != b)
                 .count();
-            let length_delta =
-                patched_bytes.len() as i64 - original_bytes.len() as i64;
+            let length_delta = patched_bytes.len() as i64 - original_bytes.len() as i64;
 
             details.push("Byte comparison: DIFFERENT".to_string());
             details.push(format!(
@@ -106,9 +99,7 @@ impl Verifier {
                 "Performance gain: NOT MEASURED — frame-time capture is not implemented"
                     .to_string(),
             );
-            details.push(
-                "Reporting FAIL so an unverified binary is never marked safe".to_string(),
-            );
+            details.push("Reporting FAIL so an unverified binary is never marked safe".to_string());
 
             Ok(VerificationReport {
                 behavioral_match: false,
@@ -129,7 +120,10 @@ impl Verifier {
         output.push_str("=== Verification Report ===\n\n");
 
         output.push_str(&format!("Behavioral Match: {}\n", report.behavioral_match));
-        output.push_str(&format!("Frame Difference: {:.4}%\n", report.frame_diff_percent));
+        output.push_str(&format!(
+            "Frame Difference: {:.4}%\n",
+            report.frame_diff_percent
+        ));
         output.push_str(&format!("Quirks Preserved: {}\n", report.quirks_preserved));
         output.push_str(&format!(
             "Performance Gain (measured): {:.1}%\n\n",

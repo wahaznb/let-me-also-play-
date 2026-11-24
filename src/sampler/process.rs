@@ -221,7 +221,11 @@ fn find_by_process_name(name: &str) -> Result<TargetProcess> {
         }
     }
 
-    choose_process(comm_matches, cmdline_matches, &format!("process name {name:?}"))
+    choose_process(
+        comm_matches,
+        cmdline_matches,
+        &format!("process name {name:?}"),
+    )
 }
 
 fn find_by_game_mapping(game_path: &Path) -> Result<TargetProcess> {
@@ -277,11 +281,7 @@ fn find_by_game_mapping(game_path: &Path) -> Result<TargetProcess> {
         ))
     };
 
-    Ok(TargetProcess {
-        pid,
-        comm,
-        warning,
-    })
+    Ok(TargetProcess { pid, comm, warning })
 }
 
 fn choose_process(
@@ -311,9 +311,7 @@ fn choose_process(
                 .map(|(pid, comm)| format!("{pid} ({comm})"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            bail!(
-                "Multiple processes match {description}: {list}. Pass --pid to choose one."
-            )
+            bail!("Multiple processes match {description}: {list}. Pass --pid to choose one.")
         }
     }
 }

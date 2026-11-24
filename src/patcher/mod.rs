@@ -208,6 +208,16 @@ impl Patcher {
     /// This preserves the original file exactly. Use [`Patcher::apply_spec`] for
     /// real byte patches.
     pub async fn apply_patches(&self, game_path: &Path, output_path: &Path) -> Result<()> {
+        // Reading, copying, and hashing a multi-GB game binary is blocking work.
+        // Keep it off the async runtime instead of stalling a worker thread.
+        let game = game_path.to_path_buf();
+        let output = output_path.to_path_buf();
+        tokio::task::spawn_blocking(move || Patcher::new().apply_patches_blocking(&game, &output))
+            .await
+            .context("The patch task failed to run")?
+    }
+
+    fn apply_patches_blocking(&self, game_path: &Path, output_path: &Path) -> Result<()> {
         info!("Loading game binary: {:?}", game_path);
 
         let mut data = Vec::new();
@@ -233,9 +243,8 @@ impl Patcher {
         }
 
         info!("No patch spec supplied; writing a byte-for-byte copy");
-        write_atomic(output_path, &data, Some(game_path)).with_context(|| {
-            format!("Failed to write patched binary {}", output_path.display())
-        })?;
+        write_atomic(output_path, &data, Some(game_path))
+            .with_context(|| format!("Failed to write patched binary {}", output_path.display()))?;
 
         info!("Patched binary saved");
         Ok(())
@@ -287,9 +296,7 @@ impl Patcher {
         if let Some(expected) = &spec.target_sha256 {
             let expected = normalize_sha256(expected)?;
             if input_sha != expected {
-                bail!(
-                    "Input SHA-256 mismatch: spec expects {expected}, file is {input_sha}"
-                );
+                bail!("Input SHA-256 mismatch: spec expects {expected}, file is {input_sha}");
             }
         }
 
@@ -432,8 +439,8 @@ impl Patcher {
         };
 
         manifest.validate()?;
-        let manifest_json = serde_json::to_vec_pretty(&manifest)
-            .context("Failed to serialize patch manifest")?;
+        let manifest_json =
+            serde_json::to_vec_pretty(&manifest).context("Failed to serialize patch manifest")?;
 
         if !dry_run {
             if let Some(parent) = manifest_path.parent() {
@@ -508,7 +515,10 @@ impl Patcher {
             bail!("Refusing to unpatch a symbolic link: {}", target.display());
         }
         if !metadata.is_file() {
-            bail!("Refusing to unpatch a non-regular file: {}", target.display());
+            bail!(
+                "Refusing to unpatch a non-regular file: {}",
+                target.display()
+            );
         }
 
         let current = std::fs::read(&target)
@@ -552,15 +562,21 @@ impl Patcher {
             let before = parse_hex_bytes(&patch.before_hex)?;
             let after = parse_hex_bytes(&patch.after_hex)?;
             if before.len() != after.len() || before.is_empty() {
-                bail!("Manifest patch at 0x{:X} has invalid byte lengths", patch.address);
+                bail!(
+                    "Manifest patch at 0x{:X} has invalid byte lengths",
+                    patch.address
+                );
             }
-            let offset = usize::try_from(patch.file_offset)
-                .context("Manifest patch offset is too large")?;
+            let offset =
+                usize::try_from(patch.file_offset).context("Manifest patch offset is too large")?;
             let end = offset
                 .checked_add(after.len())
                 .context("Manifest patch range overflows")?;
             if end > restored.len() {
-                bail!("Manifest patch at 0x{:X} is outside the file", patch.address);
+                bail!(
+                    "Manifest patch at 0x{:X} is outside the file",
+                    patch.address
+                );
             }
             if restored[offset..end] != after {
                 bail!(
@@ -586,13 +602,20 @@ impl Patcher {
                 bail!("Manifest section header is outside the file");
             }
             if restored[offset..end] != after {
-                bail!("Section header {} no longer matches the manifest", section.name);
+                bail!(
+                    "Section header {} no longer matches the manifest",
+                    section.name
+                );
             }
             restored[offset..end].copy_from_slice(&before);
         }
 
         if manifest.sections.is_empty() {
-            write_le_u32(&mut restored, manifest.checksum_offset as usize, manifest.checksum_before)?;
+            write_le_u32(
+                &mut restored,
+                manifest.checksum_offset as usize,
+                manifest.checksum_before,
+            )?;
         } else {
             write_le_u16(
                 &mut restored,
@@ -609,11 +632,7 @@ impl Patcher {
                 pe.size_of_image_offset,
                 manifest.size_of_image_before,
             )?;
-            write_le_u32(
-                &mut restored,
-                pe.checksum_offset,
-                manifest.checksum_before,
-            )?;
+            write_le_u32(&mut restored, pe.checksum_offset, manifest.checksum_before)?;
         }
         let original_len = usize::try_from(manifest.original_file_len)
             .context("Manifest original file length is too large")?;
@@ -661,18 +680,12 @@ impl Patcher {
     /// Detect binary format from the file header.
     fn detect_format(&self, data: &[u8]) -> Result<BinaryFormat> {
         if data.len() >= 0x40 && data[0] == b'M' && data[1] == b'Z' {
-            let pe_offset = u32::from_le_bytes([
-                data[0x3C],
-                data[0x3D],
-                data[0x3E],
-                data[0x3F],
-            ]) as usize;
+            let pe_offset =
+                u32::from_le_bytes([data[0x3C], data[0x3D], data[0x3E], data[0x3F]]) as usize;
 
             if pe_offset >= 0x40 {
                 if let Some(signature_end) = pe_offset.checked_add(4) {
-                    if signature_end <= data.len()
-                        && &data[pe_offset..signature_end] == b"PE\0\0"
-                    {
+                    if signature_end <= data.len() && &data[pe_offset..signature_end] == b"PE\0\0" {
                         return Ok(BinaryFormat::PE);
                     }
                 }
@@ -692,8 +705,7 @@ impl Patcher {
             let bytes = [data[0], data[1], data[2], data[3]];
             let magic_be = u32::from_be_bytes(bytes);
             let magic_le = u32::from_le_bytes(bytes);
-            const MACHO_MAGICS: [u32; 4] =
-                [0xFEED_FACE, 0xFEED_FACF, 0xCAFE_BABE, 0xCAFE_BABF];
+            const MACHO_MAGICS: [u32; 4] = [0xFEED_FACE, 0xFEED_FACF, 0xCAFE_BABE, 0xCAFE_BABF];
 
             if MACHO_MAGICS.contains(&magic_be) || MACHO_MAGICS.contains(&magic_le) {
                 return Ok(BinaryFormat::MachO);
@@ -740,7 +752,11 @@ impl Patcher {
     }
 
     /// Create an x86/x86-64 `jmp rel32` trampoline.
-    fn create_trampoline(&self, original_address: u64, new_function_address: u64) -> Result<Vec<u8>> {
+    fn create_trampoline(
+        &self,
+        original_address: u64,
+        new_function_address: u64,
+    ) -> Result<Vec<u8>> {
         let offset = new_function_address as i128 - original_address as i128 - 5;
 
         if offset < i32::MIN as i128 || offset > i32::MAX as i128 {
@@ -816,10 +832,7 @@ impl PatchSpec {
 
         let mut section_names = Vec::new();
         for section in &self.sections {
-            if section.name.is_empty()
-                || section.name.len() > 8
-                || !section.name.is_ascii()
-            {
+            if section.name.is_empty() || section.name.len() > 8 || !section.name.is_ascii() {
                 bail!("Section name must be 1..=8 ASCII characters");
             }
             if section_names.contains(&section.name) {
@@ -831,7 +844,10 @@ impl PatchSpec {
                 bail!("Section {:?} has no bytes", section.name);
             }
             if bytes.len() > MAX_SECTION_BYTES {
-                bail!("Section {:?} is larger than {MAX_SECTION_BYTES} bytes", section.name);
+                bail!(
+                    "Section {:?} is larger than {MAX_SECTION_BYTES} bytes",
+                    section.name
+                );
             }
             validate_note(&section.note)?;
         }
@@ -919,14 +935,20 @@ impl PatchManifest {
             let before = parse_hex_bytes(&patch.before_hex)?;
             let after = parse_hex_bytes(&patch.after_hex)?;
             if before.is_empty() || before.len() != after.len() {
-                bail!("Patch manifest has invalid patch bytes at 0x{:X}", patch.address);
+                bail!(
+                    "Patch manifest has invalid patch bytes at 0x{:X}",
+                    patch.address
+                );
             }
             let end = patch
                 .file_offset
                 .checked_add(after.len() as u64)
                 .context("Patch manifest range overflows")?;
             if end > self.original_file_len {
-                bail!("Patch manifest patch at 0x{:X} is outside the original file", patch.address);
+                bail!(
+                    "Patch manifest patch at 0x{:X} is outside the original file",
+                    patch.address
+                );
             }
             ranges.push((patch.file_offset, end));
         }
@@ -965,9 +987,10 @@ impl PatchManifest {
             if section.characteristics & 0x2000_0000 == 0 {
                 bail!("Patch manifest section is not executable");
             }
-            if ranges.iter().any(|(start, end)| {
-                section.header_offset < *end && *start < header_end
-            }) {
+            if ranges
+                .iter()
+                .any(|(start, end)| section.header_offset < *end && *start < header_end)
+            {
                 bail!("Patch manifest byte patch overlaps a new section header");
             }
         }
@@ -985,11 +1008,10 @@ struct PlannedPatch {
     note: Option<String>,
 }
 
-fn build_section_plans(
-    pe: &PeInfo,
-    input: &[u8],
-    spec: &PatchSpec,
-) -> Result<Vec<(NewSectionPlan, Vec<u8>, Option<String>)>> {
+/// A new section to be appended, with its contents and an optional note.
+type SectionPlan = (NewSectionPlan, Vec<u8>, Option<String>);
+
+fn build_section_plans(pe: &PeInfo, input: &[u8], spec: &PatchSpec) -> Result<Vec<SectionPlan>> {
     let mut plans = Vec::new();
     for section in &spec.sections {
         let content = parse_hex_bytes(&section.bytes)?;
@@ -1004,13 +1026,14 @@ fn build_patch_plan(
     pe: &PeInfo,
     input: &[u8],
     spec: &PatchSpec,
-    sections: &[(NewSectionPlan, Vec<u8>, Option<String>)],
+    sections: &[SectionPlan],
 ) -> Result<Vec<PlannedPatch>> {
     let mut planned = Vec::with_capacity(spec.patches.len());
     for patch in &spec.patches {
         let address = parse_hex_u64(&patch.address)?;
         let rva = pe.va_to_rva(address)?;
-        let (section, file_offset) = pe.map_rva_range(rva, parse_hex_bytes(&patch.expected)?.len())?;
+        let (section, file_offset) =
+            pe.map_rva_range(rva, parse_hex_bytes(&patch.expected)?.len())?;
         if !section.is_executable() {
             bail!(
                 "Patch target 0x{address:X} is in non-executable section {:?}",
@@ -1029,7 +1052,7 @@ fn build_patch_plan(
                 let target_va = resolve_jump_target(jump, pe, sections)?;
                 patcher.create_trampoline(address, target_va)?
             }
-            _ => unreachable!("PatchSpec::validate checked this"),
+            _ => bail!("patch must set exactly one of `replace` or `jump`"),
         };
         if before.len() != after.len() {
             bail!("Patch at 0x{address:X} changes length");
@@ -1072,11 +1095,7 @@ fn build_patch_plan(
     Ok(planned)
 }
 
-fn resolve_jump_target(
-    target: &str,
-    pe: &PeInfo,
-    sections: &[(NewSectionPlan, Vec<u8>, Option<String>)],
-) -> Result<u64> {
+fn resolve_jump_target(target: &str, pe: &PeInfo, sections: &[SectionPlan]) -> Result<u64> {
     if let Some(name) = target.strip_prefix("section:") {
         let (plan, _, _) = sections
             .iter()
@@ -1182,7 +1201,8 @@ fn parse_hex_u64(input: &str) -> Result<u64> {
     if value.is_empty() || !value.chars().all(|c| c.is_ascii_hexdigit()) {
         bail!("Invalid hexadecimal address: {input:?}");
     }
-    u64::from_str_radix(value, 16).with_context(|| format!("Invalid hexadecimal address: {input:?}"))
+    u64::from_str_radix(value, 16)
+        .with_context(|| format!("Invalid hexadecimal address: {input:?}"))
 }
 
 fn parse_hex_bytes(input: &str) -> Result<Vec<u8>> {
@@ -1318,11 +1338,7 @@ mod tests {
     use super::*;
     use crate::patcher::test_support::{pe32, PE32_ENTRY_VA};
 
-    fn patch_spec(
-        address: u64,
-        expected: &str,
-        replace: &str,
-    ) -> PatchSpec {
+    fn patch_spec(address: u64, expected: &str, replace: &str) -> PatchSpec {
         PatchSpec {
             schema_version: PATCH_SCHEMA_VERSION,
             name: Some("test".to_string()),
@@ -1343,7 +1359,10 @@ mod tests {
     fn hex_parsing_accepts_common_forms() {
         assert_eq!(parse_hex_u64("0x109214b6").unwrap(), 0x1092_14B6);
         assert_eq!(parse_hex_bytes("55 8B EC").unwrap(), vec![0x55, 0x8B, 0xEC]);
-        assert_eq!(parse_hex_bytes("0x55,0x8b_ec").unwrap(), vec![0x55, 0x8B, 0xEC]);
+        assert_eq!(
+            parse_hex_bytes("0x55,0x8b_ec").unwrap(),
+            vec![0x55, 0x8B, 0xEC]
+        );
         assert!(parse_hex_bytes("5").is_err());
         assert!(parse_hex_bytes("zz").is_err());
         assert!(parse_hex_u64("0x").is_err());
@@ -1498,7 +1517,11 @@ mod tests {
         assert_eq!(target, 0x0040_2000);
 
         let pe = PeInfo::parse(&patched).unwrap();
-        let stub = pe.sections.iter().find(|section| section.name == "stub").unwrap();
+        let stub = pe
+            .sections
+            .iter()
+            .find(|section| section.name == "stub")
+            .unwrap();
         assert_eq!(stub.virtual_address, 0x2000);
         assert!(stub.is_executable());
         assert_eq!(
@@ -1641,7 +1664,10 @@ mod tests {
             .block_on(Patcher::new().apply_patches(&game, &game))
             .unwrap_err()
             .to_string();
-        assert!(error.contains("without a matching backup"), "error: {error}");
+        assert!(
+            error.contains("without a matching backup"),
+            "error: {error}"
+        );
         crate::backup::create(&game).unwrap();
         runtime
             .block_on(Patcher::new().apply_patches(&game, &game))
@@ -1698,7 +1724,10 @@ mod tests {
         let patcher = Patcher::new();
         let mut big_endian = vec![0u8; 4];
         big_endian.copy_from_slice(&0xFEED_FACEu32.to_be_bytes());
-        assert_eq!(patcher.detect_format(&big_endian).unwrap(), BinaryFormat::MachO);
+        assert_eq!(
+            patcher.detect_format(&big_endian).unwrap(),
+            BinaryFormat::MachO
+        );
 
         let mut little_endian = vec![0u8; 4];
         little_endian.copy_from_slice(&0xFEED_FACFu32.to_le_bytes());
@@ -1718,9 +1747,7 @@ mod tests {
 
     #[test]
     fn trampoline_encoding_is_correct() {
-        let bytes = Patcher::new()
-            .create_trampoline(0x1000, 0x2000)
-            .unwrap();
+        let bytes = Patcher::new().create_trampoline(0x1000, 0x2000).unwrap();
         assert_eq!(bytes, vec![0xE9, 0xFB, 0x0F, 0x00, 0x00]);
     }
 
@@ -1818,7 +1845,11 @@ mod tests {
         std::fs::write(&input, pe32()).unwrap();
         let spec = patch_spec(PE32_ENTRY_VA, "55", "90");
 
-        let output_alias = dir.path().join("not-created").join("..").join("patched.exe");
+        let output_alias = dir
+            .path()
+            .join("not-created")
+            .join("..")
+            .join("patched.exe");
         let error = Patcher::new()
             .apply_spec(&input, &output, &spec, Some(&output_alias), false)
             .unwrap_err()
@@ -1900,5 +1931,4 @@ mod tests {
         assert_eq!(std::fs::read(&moved).unwrap(), original);
         assert!(!output.exists());
     }
-
 }

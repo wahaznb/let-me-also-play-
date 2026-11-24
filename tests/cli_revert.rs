@@ -109,12 +109,7 @@ fn dry_run_reports_without_writing() {
 
     std::fs::write(&game, b"patched").unwrap();
 
-    let output = run(&[
-        "revert",
-        "--game",
-        game.to_str().unwrap(),
-        "--dry-run",
-    ]);
+    let output = run(&["revert", "--game", game.to_str().unwrap(), "--dry-run"]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(stdout(&output).contains("dry-run"));
     assert_eq!(std::fs::read(&game).unwrap(), b"patched");
@@ -183,6 +178,10 @@ fn game_help_accepts_hyphenated_names() {
     let output = run(&["help", "deus-ex"]);
     assert!(output.status.success(), "{}", stderr(&output));
     let text = stdout(&output);
-    assert!(!text.contains("Unknown game"), "unexpected output: {}", text);
+    assert!(
+        !text.contains("Unknown game"),
+        "unexpected output: {}",
+        text
+    );
     assert!(text.contains("Deus Ex"));
 }

@@ -40,7 +40,10 @@ impl GameInfo {
                 path.join("bin").join("Game").with_extension("elf"),
             ];
 
-            candidates.into_iter().find(|p| p.exists()).unwrap_or(path.clone())
+            candidates
+                .into_iter()
+                .find(|p| p.exists())
+                .unwrap_or(path.clone())
         };
 
         info!("Analyzing: {:?}", exe_path);
@@ -390,8 +393,7 @@ mod tests {
     #[test]
     fn shared_config_is_looked_up_by_name() {
         // Unit tests run with the crate root as the working directory.
-        let config = GameInfo::load_config("Deus Ex")
-            .expect("config parse must not fail");
+        let config = GameInfo::load_config("Deus Ex").expect("config parse must not fail");
         let config = config.expect("Deus Ex should be found in config/games.yaml");
         assert_eq!(config.architecture, Architecture::X86);
         assert_eq!(config.binary_format, BinaryFormat::PE);
